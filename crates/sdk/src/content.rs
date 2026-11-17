@@ -2080,6 +2080,10 @@ impl<'a> BlockBuilder<'a> {
     pub fn no_tab(self) -> Self {
         self.tag(abi::comp::NO_TAB)
     }
+    /// Stack size (`max_stack`).
+    pub fn max_stack(self, n: u32) -> Self {
+        self.set(&c::MAX_STACK, n)
+    }
 
     /// Sounds from the group `<ns>:block.<group>` (`.break`, `.place`, `.step`, `.hit` events);
     /// a name with a namespace is used as it is (`base:block.stone` from another mod).

@@ -132,11 +132,11 @@ pub fn register(r: &mut Registry) {
             "base:spruce_planks",
         ],
     );
-    r.stairs("#has_shapes").tab(&crate::tabs::BUILDING);
-    r.slabs("#has_shapes").tab(&crate::tabs::BUILDING);
-    r.vertical_slabs("#has_shapes").tab(&crate::tabs::BUILDING);
-    r.beams("#has_shapes").tab(&crate::tabs::BUILDING);
-    r.eighths("#has_shapes").tab(&crate::tabs::BUILDING);
+    r.stairs("#has_shapes").max_stack(80).tab(&tabs::BUILDING);
+    r.slabs("#has_shapes").max_stack(128).tab(&tabs::BUILDING);
+    r.vertical_slabs("#has_shapes").max_stack(128).tab(&tabs::BUILDING);
+    r.beams("#has_shapes").max_stack(256).tab(&tabs::BUILDING);
+    r.eighths("#has_shapes").max_stack(512).tab(&tabs::BUILDING);
     r.block(&STONE)
         .sound_group("stone")
         .hardness(1.5)
