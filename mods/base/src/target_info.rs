@@ -11,7 +11,7 @@ pub fn register(r: &mut Registry) {
             block_info(target.state).map(|b| (format!("block:{}", b.name), b.owner.to_string(), b.item))
         } else {
             ui.view().client().entity(target.entity).map(|e| {
-                let name = name_of(abi::entry_kind::ENTITY, e.kind);
+                let name = name_of(registry_id("core:entity").expect("core entity registry"), e.kind);
                 (format!("entity:{name}"), name.split_once(':').map_or("", |s| s.0).to_string(), None)
             })
         };
@@ -28,7 +28,7 @@ pub fn register(r: &mut Registry) {
             });
             if target.state != 0 {
                 let level = HARVEST_LEVEL.on_block(target.state).unwrap_or(0);
-                for (tag, schema) in components_of(abi::entry_kind::BLOCK, target.state) {
+                for (tag, schema) in components_of(registry_id("core:block").expect("core block registry"), target.state) {
                     if let Some(tool) = tag.strip_prefix("mineable/").filter(|_| schema.is_empty()) {
                         ui.text_args("hud.base.target.tool", &[Arg::Key(&format!("tool.{tool}")), Arg::Int(level as i64)]);
                     }

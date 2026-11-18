@@ -2,7 +2,9 @@
 //! side by side, so a listed command always has one.
 
 use glam::{DVec3, IVec3};
-use weft_abi::{ItemStack, Who, damage_cause as damage, entry_kind as ek};
+use weft_abi::{ItemStack, Who, damage_cause as damage};
+
+use crate::entries::kind as ek;
 
 use super::Server;
 use crate::commands::Args;

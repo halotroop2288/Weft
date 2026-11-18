@@ -8,8 +8,9 @@
 //! component that carries values on that kind. A check is one load and a bit test; mods read the
 //! same tables directly through `abi::ComponentTable`.
 
+use crate::entries::kind as ek;
 use rustc_hash::FxHashMap;
-use weft_abi::{self as abi, Str, entry_kind as ek};
+use weft_abi::{self as abi, Str};
 
 pub const BLOCK: usize = ek::BLOCK as usize;
 pub const ITEM: usize = ek::ITEM as usize;
@@ -204,8 +205,8 @@ impl Table {
             .collect()
     }
 
-    fn view(&self, columns: &[abi::Column]) -> abi::KindTable {
-        abi::KindTable { entries: self.entries, words: self.words, bits: self.bits.as_ptr(), columns: columns.as_ptr() }
+    fn view(&self, columns: &[abi::Column]) -> abi::RegistryTable {
+        abi::RegistryTable { entries: self.entries, words: self.words, bits: self.bits.as_ptr(), columns: columns.as_ptr() }
     }
 }
 
@@ -259,6 +260,9 @@ pub struct Components {
     texts: Vec<Box<str>>,
     blobs: Vec<Box<[u8]>>,
     columns: Vec<Vec<abi::Column>>,
+    registry_tables: Vec<abi::RegistryTable>,
+    kind_registry: Vec<Option<usize>>,
+    registry_slots: FxHashMap<abi::RegistryId, usize>,
     refs: Option<Box<Refs>>,
     abi: Box<abi::ComponentTable>,
     /// Per component: the table holds a `Slice` to its packed items (a list).
@@ -340,6 +344,30 @@ impl Components {
         matcher: &mut dyn FnMut(&str, &Components) -> Result<u32, String>,
         errors: &mut Vec<String>,
     ) {
+        self.add_table_at(kind, entries, matcher, errors);
+    }
+
+    pub fn add_registry_table(
+        &mut self,
+        registry: abi::RegistryId,
+        entries: &[crate::entries::Entry],
+        matcher: &mut dyn FnMut(&str, &Components) -> Result<u32, String>,
+        errors: &mut Vec<String>,
+    ) {
+        let Some(&slot) = self.registry_slots.get(&registry) else {
+            errors.push(format!("component table has no slot for registry {}", registry.0));
+            return;
+        };
+        self.add_table_at(slot, entries, matcher, errors);
+    }
+
+    fn add_table_at(
+        &mut self,
+        kind: usize,
+        entries: &[crate::entries::Entry],
+        matcher: &mut dyn FnMut(&str, &Components) -> Result<u32, String>,
+        errors: &mut Vec<String>,
+    ) {
         let mut t = Table::new(entries.len(), self.names.len());
         let (mut texts, mut blobs) = (Vec::new(), Vec::new());
         for (i, e) in entries.iter().enumerate() {
@@ -354,9 +382,20 @@ impl Components {
         }
         self.texts.append(&mut texts);
         self.blobs.append(&mut blobs);
+        while self.tables.len() <= kind {
+            let empty = Table::new(0, self.names.len());
+            self.columns.push(empty.columns());
+            self.tables.push(empty);
+            self.kind_registry.push(None);
+        }
+        let Some(registry) = self.kind_registry[kind] else {
+            errors.push(format!("component table slot {kind} has no registry mapping"));
+            return;
+        };
         self.columns[kind] = t.columns();
-        self.abi.kinds[kind] = t.view(&self.columns[kind]);
         self.tables[kind] = t;
+        self.registry_tables[registry] = self.tables[kind].view(&self.columns[kind]);
+        self.abi.registries = abi::Slice::new(&self.registry_tables);
     }
 }
 
@@ -427,6 +466,7 @@ pub struct Builder {
     /// they test are filled.
     pub matchers: Vec<(String, String)>,
     match_ids: FxHashMap<String, u32>,
+    registry_slots: Vec<(abi::RegistryId, usize)>,
 }
 
 impl Default for Builder {
@@ -442,6 +482,7 @@ impl Default for Builder {
             refs: None,
             matchers: Vec::new(),
             match_ids: FxHashMap::default(),
+            registry_slots: Vec::new(),
         };
         for (name, schema) in BUILTIN {
             b.decl
@@ -488,6 +529,16 @@ impl Builder {
     /// Assigns ids and allocates the tables of the first kinds (`entries` of each); values go in
     /// with `put` afterwards, the other kinds' with `Components::add_table`.
     pub fn start(&mut self, entries: &[usize]) {
+        self.start_with_registry_slots(
+            entries,
+            (0..KINDS)
+                .map(|kind| (abi::RegistryId(kind as u32), kind))
+                .collect(),
+        );
+    }
+
+    /// Allocates engine-internal tables and maps each frozen RegistryId to its internal slot.
+    pub fn start_with_registry_slots(&mut self, entries: &[usize], registry_slots: Vec<(abi::RegistryId, usize)>) {
         let mut names: Vec<String> = self.decl.keys().cloned().collect();
         names.sort();
         self.ids = names
@@ -495,9 +546,15 @@ impl Builder {
             .enumerate()
             .map(|(i, n)| (n.clone(), i as u32))
             .collect();
-        self.tables = (0..KINDS)
+        let table_count = registry_slots
+            .iter()
+            .map(|(_, slot)| *slot)
+            .max()
+            .map_or(KINDS, |slot| (slot + 1).max(KINDS));
+        self.tables = (0..table_count)
             .map(|k| Table::new(entries.get(k).copied().unwrap_or(0), names.len()))
             .collect();
+        self.registry_slots = registry_slots;
         self.names = names;
     }
 
@@ -561,16 +618,38 @@ impl Builder {
     }
 
     pub fn finish(self) -> Components {
-        let Builder { decl, names, ids, tables, texts, blobs, refs, .. } = self;
+        let Builder { decl, names, ids, tables, texts, blobs, refs, registry_slots, .. } = self;
         let schemas: Vec<String> = names.iter().map(|n| decl[n].0.clone()).collect();
         let columns: Vec<Vec<abi::Column>> = tables.iter().map(Table::columns).collect();
-        let kinds: [abi::KindTable; KINDS] = std::array::from_fn(|k| tables[k].view(&columns[k]));
-        let abi = Box::new(abi::ComponentTable { components: names.len() as u32, kinds });
+        let mut kind_registry = vec![None; tables.len()];
+        for (registry, &(_, slot)) in registry_slots.iter().enumerate() {
+            kind_registry[slot] = Some(registry);
+        }
+        let registry_tables: Vec<abi::RegistryTable> = registry_slots
+            .iter()
+            .map(|(_, slot)| tables[*slot].view(&columns[*slot]))
+            .collect();
+        let registry_slots: FxHashMap<abi::RegistryId, usize> = registry_slots.into_iter().collect();
+        let abi = Box::new(abi::ComponentTable { components: names.len() as u32, registries: abi::Slice::new(&registry_tables) });
         let packed = schemas
             .iter()
             .map(|s| s.starts_with('<') || abi::data::list_of(s).is_some())
             .collect();
-        Components { names, schemas, by_name: ids, tables, texts, blobs, columns, refs, abi, packed }
+        Components {
+            names,
+            schemas,
+            by_name: ids,
+            tables,
+            texts,
+            blobs,
+            columns,
+            registry_tables,
+            kind_registry,
+            registry_slots,
+            refs,
+            abi,
+            packed,
+        }
     }
 }
 
@@ -671,9 +750,55 @@ mod tests {
         assert_eq!(c.of(BLOCK, 2).collect::<Vec<_>>(), vec![soil]);
         // The table mods read says the same.
         let t = unsafe { &*c.table() };
-        let k = &t.kinds[BLOCK];
+        let registries = unsafe { t.registries.as_slice() };
+        let k = &registries[BLOCK];
         let word = unsafe { *k.bits.add((2 * k.words + soil / 64) as usize) };
         assert_eq!(word >> (soil % 64) & 1, 1);
+    }
+
+    #[test]
+    fn component_tables_follow_registry_id_order_not_engine_slots() {
+        let mut b = Builder::default();
+        b.start_with_registry_slots(&[1, 2, 3], vec![(abi::RegistryId(0), 2), (abi::RegistryId(1), 0), (abi::RegistryId(2), 1)]);
+        let c = b.finish();
+
+        let table = unsafe { &*c.table() };
+        let registries = unsafe { table.registries.as_slice() };
+        assert_eq!(registries.len(), 3);
+        assert_eq!(registries[0].entries, 3);
+        assert_eq!(registries[1].entries, 1);
+        assert_eq!(registries[2].entries, 2);
+    }
+
+    #[test]
+    fn component_table_grows_for_dynamic_registries() {
+        let mut b = Builder::default();
+        let mut errors = Vec::new();
+        b.declare("power", "u32", Some(4), &|| "arcana: ember".into(), &mut errors);
+        b.start_with_registry_slots(
+            &[1],
+            (0..KINDS + 3)
+                .map(|slot| (abi::RegistryId((100 + slot) as u32), slot))
+                .collect(),
+        );
+        let mut c = b.finish();
+        let entry = crate::entries::Entry {
+            name: "ember".into(),
+            owner: abi::ModId(0),
+            cells: Vec::new(),
+            values: vec![value("power", "u32", 7)],
+            callers: Vec::new(),
+            parts: Vec::new(),
+        };
+        let mut matcher = |_: &str, _: &Components| Ok(0);
+        c.add_registry_table(abi::RegistryId((100 + KINDS + 2) as u32), &[entry], &mut matcher, &mut errors);
+        let power = c.id("power").unwrap();
+        assert_eq!(c.get::<u32>(KINDS + 2, 0, power), Some(7));
+        let table = unsafe { &*c.table() };
+        let registries = unsafe { table.registries.as_slice() };
+        assert_eq!(registries.len(), KINDS + 3);
+        assert_eq!(registries[KINDS + 2].entries, 1);
+        assert!(errors.is_empty());
     }
 
     #[test]

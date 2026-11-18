@@ -1646,7 +1646,7 @@ impl Registry {
 
     /// A component's declaration with its schema, the rest up to the caller.
     pub(crate) fn declare<T: crate::component::Data>(&mut self, name: &str) -> DeclarationBuilder<'_> {
-        let e = crate::entry::Entry::new(abi::entry_kind::COMPONENT, name.to_string());
+        let e = crate::entry::Entry::new("core:component", name.to_string());
         DeclarationBuilder { reg: self, e }.set_text(&comps::component::SCHEMA, &T::schema())
     }
 
@@ -1715,7 +1715,7 @@ impl Registry {
 
     /// An inventory of `slots` a holder can keep besides its own (`Storage`).
     pub fn storage(&mut self, storage: &Storage, slots: u32) -> DeclarationBuilder<'_> {
-        let e = crate::entry::Entry::new(abi::entry_kind::COMPONENT, storage.name().to_string());
+        let e = crate::entry::Entry::new("core:component", storage.name().to_string());
         DeclarationBuilder { reg: self, e }.set(&comps::component::SLOTS, slots)
     }
 
@@ -1783,7 +1783,7 @@ impl Registry {
     ) -> ScreenPartBuilder<'_> {
         use comps::screen_part as s;
         let name = self.derive_name(&format!("{}/{area}", screen.path()));
-        ScreenPartBuilder { reg: self, e: crate::entry::Entry::new(abi::entry_kind::SCREEN_PART, name) }
+        ScreenPartBuilder { reg: self, e: crate::entry::Entry::new("core:screen_part", name) }
             .set_text(&s::SCREEN, screen.name())
             .set_text(&s::AREA, area)
             .set(&s::ORDER, order)
@@ -1873,7 +1873,7 @@ impl Registry {
     fn recipe(&mut self, kind: &RecipeKind, output: &str, count: u32) -> RecipeBuilder<'_> {
         let output = self.ingredient(output);
         let name = self.derive_name(&format!("{}/{}", kind.path(), output.split_once(':').map_or(output.as_str(), |o| o.1)));
-        RecipeBuilder { reg: self, e: crate::entry::Entry::new(abi::entry_kind::RECIPE, name) }
+        RecipeBuilder { reg: self, e: crate::entry::Entry::new("core:recipe", name) }
             .set_text(&comps::recipe::KIND, kind.name())
             .set_text(&comps::recipe::OUTPUT, &output)
             .set(&comps::recipe::COUNT, count)
@@ -2164,7 +2164,8 @@ impl RecipeView {
     }
     /// A value the recipe carries (`r.shaped(..).set(&COMP, v)`): its entry's.
     pub fn value<T: Value, K>(&self, comp: &Component<T, K>) -> Option<T> {
-        comp.on(abi::entry_kind::RECIPE, self.info().entry)
+        let registry = crate::registry_id("core:recipe")?;
+        comp.on_registry(registry, self.info().entry)
     }
     /// Takes its inputs out of `stacks` (the ones `recipe_find` was given); false, and nothing
     /// taken, if they are not all there.
@@ -2227,7 +2228,7 @@ pub struct SpawnBuilder<'a> {
 impl Registry {
     pub fn natural_spawn(&mut self, entity: &EntityKind) -> SpawnBuilder<'_> {
         let name = self.derive_name(entity.path());
-        SpawnBuilder { reg: self, e: crate::entry::Entry::new(abi::entry_kind::SPAWN, name) }.set_text(&comps::spawn::ENTITY, entity.name())
+        SpawnBuilder { reg: self, e: crate::entry::Entry::new("core:spawn_rule", name) }.set_text(&comps::spawn::ENTITY, entity.name())
     }
 
     fn spawn_entry(&mut self, rule: &'static crate::SpawnRule) -> SpawnBuilder<'_> {

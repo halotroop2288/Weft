@@ -272,7 +272,7 @@ impl SkyBuilder<'_> {
 
 impl Registry {
     fn sky_object<'a>(&'a mut self, dimension: &Dimension, object: &SkyObject, kind: u32) -> SkyBuilder<'a> {
-        let e = crate::entry::Entry::new(abi::entry_kind::SKY, format!("{}/{}", dimension.name(), object.name()));
+        let e = crate::entry::Entry::new("core:sky_object", format!("{}/{}", dimension.name(), object.name()));
         SkyBuilder { reg: self, e }.set(&comps::sky::KIND, kind)
     }
 

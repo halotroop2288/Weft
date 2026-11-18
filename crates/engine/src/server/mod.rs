@@ -41,12 +41,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::entries::kind as ek;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use glam::{DVec3, IVec3};
 use parking_lot::Mutex;
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
-use weft_abi::{self as abi, ItemStack, component_flags as cf, entry_kind as ek};
+use weft_abi::{self as abi, ItemStack, component_flags as cf};
 
 pub use dim::{Dim, DimEvent};
 

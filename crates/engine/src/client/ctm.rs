@@ -37,8 +37,8 @@
 //! for the whole block, and its faces then resolve as any others. `hides_neighbors = false` says
 //! a block this applies to has holes, so what is next to it is drawn.
 
+use crate::entries::kind as ek;
 use std::sync::{Arc, RwLock};
-use weft_abi::entry_kind as ek;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 

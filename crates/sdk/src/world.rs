@@ -346,21 +346,26 @@ pub fn block_of(state: u32) -> u32 {
 }
 
 /// Full name of a block state (`base:furnace[facing=north,lit=false]`), item, entity kind ...
-/// by its id; `kind` is `abi::entry_kind`. Empty if unknown.
-pub fn name_of(kind: u32, id: u32) -> &'static str {
-    unsafe { (host().name_of)(kind, id).as_str() }
+/// by its id. Empty if unknown.
+pub fn name_of(registry: abi::RegistryId, id: u32) -> &'static str {
+    unsafe { (host().name_of)(registry, id).as_str() }
 }
 
 /// What to save instead of a dimension's id: ids are numbers in the order mods registered them, and
 /// shift when a mod comes or goes. This goes by its name.
 pub fn dimension_key(id: u32) -> u64 {
-    abi::fnv(name_of(abi::entry_kind::DIMENSION, id).as_bytes())
+    abi::fnv(
+        crate::registry_id("core:dimension")
+            .map_or("", |registry| name_of(registry, id))
+            .as_bytes(),
+    )
 }
 
 /// The dimension a saved `dimension_key` means now, if it is still there.
 pub fn dimension_from_key(key: u64) -> Option<u32> {
+    let registry = crate::registry_id("core:dimension")?;
     (0..)
-        .map_while(|id| Some((id, name_of(abi::entry_kind::DIMENSION, id))).filter(|n| !n.1.is_empty()))
+        .map_while(|id| Some((id, name_of(registry, id))).filter(|n| !n.1.is_empty()))
         .find(|n| abi::fnv(n.1.as_bytes()) == key)
         .map(|n| n.0)
 }
@@ -463,11 +468,11 @@ pub fn item_info(item: u32) -> Option<ItemInfo> {
 }
 
 pub fn block_name(state: u32) -> &'static str {
-    name_of(abi::entry_kind::BLOCK, state)
+    crate::registry_id("core:block").map_or("", |registry| name_of(registry, state))
 }
 
 pub fn item_name(item: u32) -> &'static str {
-    name_of(abi::entry_kind::ITEM, item)
+    crate::registry_id("core:item").map_or("", |registry| name_of(registry, item))
 }
 
 /// How cubes kept loaded go on with no player near (`World::keep_loaded`).

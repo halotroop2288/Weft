@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use weft_sdk::abi::entry_kind as ek;
 use weft_sdk::terrain::Column;
 use weft_sdk::*;
 
@@ -331,7 +330,12 @@ pub async fn fly_load(t: T) -> R {
     // The way with the most mountains: their slopes ask the most of what comes first.
     let mountains = |x: i32| {
         (0..24)
-            .filter(|i| matches!(name_of(ek::BIOME, OVERWORLD.column(5, x, -400 * i).biome), "base:mountains" | "base:snowy_peaks"))
+            .filter(|i| {
+                matches!(
+                    name_of(registry_id("core:biome").expect("core biome registry"), OVERWORLD.column(5, x, -400 * i).biome),
+                    "base:mountains" | "base:snowy_peaks"
+                )
+            })
             .count()
     };
     let way = (-40..40)
@@ -575,13 +579,13 @@ pub async fn foreign_terrain(t: T) -> R {
         .collect();
     let count = |name: &str| {
         grid.iter()
-            .filter(|g| name_of(ek::BIOME, g.2.biome) == name)
+            .filter(|g| name_of(registry_id("core:biome").expect("core biome registry"), g.2.biome) == name)
             .count()
     };
     t.note(format!("of {} columns: dust {}, scorched {}", grid.len(), count("testmod:dust"), count("testmod:scorched")));
-    let scorched = grid
-        .into_iter()
-        .find(|&(x, z, c)| name_of(ek::BIOME, c.biome) == "testmod:scorched" && !MARS.surface_carved(seed, x, z));
+    let scorched = grid.into_iter().find(|&(x, z, c)| {
+        name_of(registry_id("core:biome").expect("core biome registry"), c.biome) == "testmod:scorched" && !MARS.surface_carved(seed, x, z)
+    });
     let (x, z, c) = scorched.ok_or("no scorched biome on Mars")?;
     t.note(format!("scorched at {x} {z}, height {}", c.height));
     t.cmd(&format!("/tp {x} {} {z}", c.height + 3)).await?;
@@ -616,7 +620,10 @@ pub async fn plants_on_cube_tops(t: T) -> R {
         .filter(|&(x, z)| {
             [(0, 0), (20, 0), (-20, 0), (0, 20), (0, -20)]
                 .iter()
-                .all(|&(dx, dz)| name_of(ek::BIOME, OVERWORLD.column(5, x + dx, z + dz).biome) == "base:plains")
+                .all(|&(dx, dz)| {
+                    name_of(registry_id("core:biome").expect("core biome registry"), OVERWORLD.column(5, x + dx, z + dz).biome)
+                        == "base:plains"
+                })
         })
         .take(40)
         .max_by_key(|&(x, z)| tops(x, z));
@@ -650,7 +657,9 @@ pub async fn plants_on_cube_tops(t: T) -> R {
     };
     let beach = (-60..60)
         .flat_map(|i| (-60..60).map(move |j| (i * 24, j * 24)))
-        .filter(|&(x, z)| shore(x, z) && name_of(ek::BIOME, OVERWORLD.column(5, x, z).biome) == "base:beach")
+        .filter(|&(x, z)| {
+            shore(x, z) && name_of(registry_id("core:biome").expect("core biome registry"), OVERWORLD.column(5, x, z).biome) == "base:beach"
+        })
         .take(30)
         .max_by_key(|&(x, z)| near(x, z));
     let (x, z) = beach.ok_or("no beach")?;
@@ -1092,7 +1101,9 @@ pub async fn worldgen(t: T) -> R {
             .filter(|&(x, z)| {
                 [(0, 0), (24, 0), (-24, 0), (0, 24), (0, -24)]
                     .iter()
-                    .all(|&(dx, dz)| name_of(ek::BIOME, OVERWORLD.column(5, x + dx, z + dz).biome) == biome)
+                    .all(|&(dx, dz)| {
+                        name_of(registry_id("core:biome").expect("core biome registry"), OVERWORLD.column(5, x + dx, z + dz).biome) == biome
+                    })
             })
             .nth(skip)
             .map(|(x, z)| [x, OVERWORLD.column(5, x, z).height + 6, z])
@@ -1158,7 +1169,8 @@ pub async fn worldgen(t: T) -> R {
     // Testmod puts base's forest on Mars; the engine scatters its trees there like at home.
     static MARS: Dimension = Dimension::named("testmod:mars");
     let seed = 5;
-    let forest = |x: i32, z: i32| name_of(ek::BIOME, MARS.column(seed, x, z).biome) == "base:forest";
+    let forest =
+        |x: i32, z: i32| name_of(registry_id("core:biome").expect("core biome registry"), MARS.column(seed, x, z).biome) == "base:forest";
     let spot = (-60..60)
         .flat_map(|i| (-60..60).map(move |j| (i * 32, j * 32)))
         .find(|&(x, z)| {
@@ -1425,7 +1437,7 @@ pub async fn generation_reads(t: T) -> R {
     for (p, s) in points.into_iter().step_by(31) {
         t.check_eq(
             t.op(&format!("get {}", at(p))).await?,
-            name_of(ek::BLOCK, block_of(s)).to_string(),
+            name_of(registry_id("core:block").expect("core block registry"), block_of(s)).to_string(),
             "generated cubes agree with snapshots",
         );
     }

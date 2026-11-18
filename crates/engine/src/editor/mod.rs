@@ -7,9 +7,9 @@
 pub mod code;
 mod model;
 
+use crate::entries::kind as ek;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use weft_abi::entry_kind as ek;
 
 use code::{Call, Param, Thing, What};
 

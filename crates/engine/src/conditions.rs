@@ -1,4 +1,4 @@
-//! Conditions (`entry_kind::CONDITION`): one predicate language for music, `{if:..}` in text,
+//! Conditions (`engine condition registry`): one predicate language for music, `{if:..}` in text,
 //! loot tables, natural spawning, poses and camera modes, and for mods (`w.holds`). A condition
 //! is a record with maybe an argument, `core:light(..7)`, put together with `&`, `|`, `!` and
 //! parentheses; the engine's go without their namespace (`night & light(..7)`). Every distinct
@@ -7,7 +7,9 @@
 
 use glam::DVec3;
 use rustc_hash::FxHashMap;
-use weft_abi::{self as abi, condition as k, entry_kind as ek};
+use weft_abi::{self as abi, condition as k};
+
+use crate::entries::kind as ek;
 
 use crate::content::Content;
 use crate::registry::Answer;

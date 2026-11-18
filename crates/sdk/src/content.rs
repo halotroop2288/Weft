@@ -5,13 +5,14 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use crate::abi::{self, BlockModel, RenderLayer, Slice, Str};
 use crate::component::{self as c, Component, Data, Value};
 use crate::comps::block as bc;
-use crate::{World, callback, host, qualify};
+use crate::{Text, World, callback, host, qualify};
 
 /// What a handle can name. Kinds with engine ids (`HasId`) can also be resolved to one.
+/// Every kind resolves its registry by namespaced identifier.
 pub mod kind {
     pub trait Kind {
-        /// `abi::entry_kind`, or `u32::MAX` for things known only by name.
-        const KIND: u32;
+        /// Namespaced meta-registry that owns this kind.
+        const REGISTRY: &'static str;
     }
     /// Kinds the engine numbers (blocks, items...): their handles give ids.
     pub trait HasId: Kind {}
@@ -29,75 +30,81 @@ pub mod kind {
         fn builder<'a>(r: &'a mut crate::Registry, h: &'static super::Handle<Self>, mode: u32) -> Self::Builder<'a>;
     }
     macro_rules! kinds {
-        ($($n:ident = $v:expr),*) => {
+        ($($n:ident = $registry:literal),*) => {
             $(pub struct $n;
             impl Kind for $n {
-                const KIND: u32 = $v;
+                const REGISTRY: &'static str = $registry;
             }
             impl HasId for $n {}
             impl On<$n> for $n {})*
         };
     }
     kinds!(
-        Block = crate::abi::entry_kind::BLOCK,
-        Item = crate::abi::entry_kind::ITEM,
-        Entity = crate::abi::entry_kind::ENTITY,
-        Biome = crate::abi::entry_kind::BIOME,
-        Dimension = crate::abi::entry_kind::DIMENSION,
-        Menu = crate::abi::entry_kind::MENU,
-        Particle = crate::abi::entry_kind::PARTICLE,
-        Config = crate::abi::entry_kind::CONFIG,
-        Sound = crate::abi::entry_kind::SOUND,
-        DamageCause = crate::abi::entry_kind::DAMAGE_CAUSE,
-        EntityEffect = crate::abi::entry_kind::ENTITY_EFFECT,
-        TextPlace = crate::abi::entry_kind::TEXT_PLACE,
-        GameMode = crate::abi::entry_kind::GAME_MODE,
-        Pose = crate::abi::entry_kind::POSE,
-        Weather = crate::abi::entry_kind::WEATHER,
-        Precipitation = crate::abi::entry_kind::PRECIPITATION,
-        Condition = crate::abi::entry_kind::CONDITION,
-        Music = crate::abi::entry_kind::MUSIC,
-        CameraMode = crate::abi::entry_kind::CAMERA,
-        EquipmentSlot = crate::abi::entry_kind::EQUIPMENT_SLOT,
-        CreativeTab = crate::abi::entry_kind::CREATIVE_TAB,
-        SoundCategory = crate::abi::entry_kind::SOUND_CATEGORY,
-        EntityCategory = crate::abi::entry_kind::ENTITY_CATEGORY,
-        TintKind = crate::abi::entry_kind::TINT_KIND,
-        RecipeKind = crate::abi::entry_kind::RECIPE_KIND,
-        Attribute = crate::abi::entry_kind::ATTRIBUTE,
-        Key = crate::abi::entry_kind::KEY,
-        Liquid = crate::abi::entry_kind::LIQUID,
-        Feature = crate::abi::entry_kind::FEATURE,
-        Record = crate::abi::entry_kind::RECORD
+        Block = "core:block",
+        Item = "core:item",
+        Entity = "core:entity",
+        Biome = "core:biome",
+        Dimension = "core:dimension",
+        Menu = "core:menu",
+        Particle = "core:particle",
+        Config = "core:config",
+        Sound = "core:sound",
+        DamageCause = "core:damage_cause",
+        EntityEffect = "core:entity_effect",
+        TextPlace = "core:text_place",
+        GameMode = "core:game_mode",
+        Pose = "core:pose",
+        Weather = "core:weather",
+        Precipitation = "core:precipitation",
+        Condition = "core:condition",
+        Music = "core:music",
+        CameraMode = "core:camera_mode",
+        EquipmentSlot = "core:equipment_slot",
+        SoundCategory = "core:sound_category",
+        EntityCategory = "core:entity_category",
+        TintKind = "core:tint_kind",
+        RecipeKind = "core:recipe_kind",
+        Attribute = "core:attribute",
+        Key = "core:key",
+        Liquid = "core:liquid",
+        Feature = "core:feature",
+        Record = "core:record"
     );
+    /// Creative tabs are owned by the base mod, not the engine.
+    pub struct CreativeTab;
+    impl Kind for CreativeTab {
+        const REGISTRY: &'static str = "base:creative_tab";
+    }
+    impl On<CreativeTab> for CreativeTab {}
+
     /// Kinds without ids: entries of their own number, or things known only by name.
     macro_rules! named_kinds {
         ($($n:ident $(= $v:expr)?),*) => {
             $(pub struct $n;
             impl Kind for $n {
-                const KIND: u32 = named_kinds!(@kind $($v)?);
+                const REGISTRY: &'static str = named_kinds!(@registry $($v)?);
             }
             impl On<$n> for $n {})*
         };
-        (@kind $v:expr) => { $v };
-        (@kind) => { u32::MAX };
+        (@registry $v:literal) => { $v };
+        (@registry) => { "" };
     }
     named_kinds!(
-        SkyObject = crate::abi::entry_kind::SKY,
-        HudElement = crate::abi::entry_kind::HUD_ELEMENT,
-        ScreenPart = crate::abi::entry_kind::SCREEN_PART,
-        WordSet = crate::abi::entry_kind::WORDS,
-        Declaration = crate::abi::entry_kind::COMPONENT,
-        Recipe = crate::abi::entry_kind::RECIPE,
-        LootTable = crate::abi::entry_kind::LOOT,
-        Reaction = crate::abi::entry_kind::REACTION,
-        Template = crate::abi::entry_kind::TEMPLATE,
-        Palette = crate::abi::entry_kind::PALETTE,
-        SpawnRule = crate::abi::entry_kind::SPAWN,
-        Terrain = crate::abi::entry_kind::TERRAIN,
-        BoneMotion = crate::abi::entry_kind::BONE_MOTION,
-        Step = crate::abi::entry_kind::STEP,
-        Phase = crate::abi::entry_kind::PHASE,
+        SkyObject = "core:sky_object",
+        HudElement = "core:hud_element",
+        ScreenPart = "core:screen_part",
+        WordSet = "core:word_set",
+        Declaration = "core:component",
+        Recipe = "core:recipe",
+        LootTable = "core:loot_table",
+        Reaction = "core:reaction",
+        Template = "core:template",
+        Palette = "core:palette",
+        SpawnRule = "core:spawn_rule",
+        Terrain = "core:terrain",
+        BoneMotion = "core:bone_motion",
+        Step = "core:step",
+        Phase = "core:phase",
         GizmoGroup,
         Shader,
         Question,
@@ -229,19 +236,14 @@ impl<K: kind::HasId> Handle<K> {
             return u32::MAX;
         }
         let mut count = 0;
-        let id = unsafe { (host().find)(K::KIND, Str::new(self.name()), &mut count) };
+        let registry = crate::registry_id(K::REGISTRY);
+        let id = registry.map_or(u32::MAX, |registry| unsafe { (host().find)(registry, Str::new(self.name()), &mut count) });
         if id != u32::MAX {
             self.count.store(count, Ordering::Relaxed);
             self.id.store(id, Ordering::Relaxed);
         } else {
             // Frozen and still unknown: a typo or a missing mod. Say so once.
-            crate::error!(
-                "no {} named {}",
-                abi::entry_kind::NAMES
-                    .get(K::KIND as usize)
-                    .unwrap_or(&"entry"),
-                self.name()
-            );
+            crate::error!("no {} named {}", K::REGISTRY, self.name());
             self.id.store(u32::MAX, Ordering::Relaxed);
         }
         id
@@ -250,7 +252,8 @@ impl<K: kind::HasId> Handle<K> {
     /// The id of what a player typed (`/give` style input), `None` if there is no such thing.
     /// Code names things with handles; this is for text that only exists at runtime.
     pub fn lookup(name: &str) -> Option<u32> {
-        let id = unsafe { (host().find)(K::KIND, Str::new(name), std::ptr::null_mut()) };
+        let Some(registry) = crate::registry_id(K::REGISTRY) else { return None };
+        let id = unsafe { (host().find)(registry, Str::new(name), std::ptr::null_mut()) };
         (id != u32::MAX).then_some(id)
     }
 
@@ -279,7 +282,9 @@ impl<K: kind::HasId> Handle<K> {
             return 0;
         }
         let mut n = 0;
-        unsafe { (host().find)(K::KIND, Str::new(self.name()), &mut n) };
+        if let Some(registry) = crate::registry_id(K::REGISTRY) {
+            unsafe { (host().find)(registry, Str::new(self.name()), &mut n) };
+        }
         self.count.store(n.max(1), Ordering::Relaxed);
         n.max(1)
     }
@@ -868,12 +873,18 @@ fn tab_tag(tab: &CreativeTab) -> String {
 }
 
 /// A creative tab being registered (`Registry::creative_tab`).
-pub struct CreativeTabBuilder<'a> {
-    reg: &'a mut Registry,
-    e: crate::entry::Entry,
+pub type CreativeTabBuilder<'a> = RegistryEntryBuilder<'a>;
+
+impl kind::Builds for kind::CreativeTab {
+    type Builder<'a> = CreativeTabBuilder<'a>;
+
+    fn builder<'a>(r: &'a mut Registry, h: &'static Handle<Self>, mode: u32) -> Self::Builder<'a> {
+        let registry = r.find_registry(<Self as kind::Kind>::REGISTRY);
+        r.registry_entry_in(registry, h.name(), mode)
+    }
 }
 
-crate::entry::entry_builder!(CreativeTab => CreativeTabBuilder, creative_tab_entry;);
+pub static CREATIVE_TAB_ICON: Component<Text> = Component::named("creative_tab.icon");
 
 /// The creative tab every entity's spawn egg goes to.
 pub static SPAWN_EGGS: CreativeTab = CreativeTab::named("core:spawn_eggs");
@@ -913,6 +924,47 @@ impl LootSource for EntityKind {
 impl LootSource for LootTable {
     fn table_name(&self) -> &str {
         self.name()
+    }
+}
+
+/// Builder for an entry in a mod-declared registry. Components use the unrestricted
+/// `kind::Any` marker because the registry owner defines its component vocabulary.
+pub struct RegistryEntryBuilder<'a> {
+    reg: &'a mut Registry,
+    registry: abi::RegistryId,
+    name: String,
+    mode: u32,
+    ops: Vec<Pending>,
+}
+
+impl<'a> RegistryEntryBuilder<'a> {
+    fn new(reg: &'a mut Registry, registry: abi::RegistryId, name: &str, mode: u32) -> Self {
+        let name = qualify(reg.ns, name);
+        Self { reg, registry, name, mode, ops: Vec::new() }
+    }
+}
+
+impl WithComponents for RegistryEntryBuilder<'_> {
+    type Kind = kind::Any;
+
+    fn pending(&mut self) -> &mut Vec<Pending> {
+        &mut self.ops
+    }
+}
+
+impl Drop for RegistryEntryBuilder<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() || self.registry.0 == u32::MAX {
+            return;
+        }
+        let mut scratch = Vec::new();
+        let ops = raw_values(&self.ops, &mut scratch)
+            .into_iter()
+            .zip(&self.ops)
+            .map(|(value, pending)| abi::ValueOp { op: pending.op, value, anchor: Str::new(&pending.anchor) })
+            .collect::<Vec<_>>();
+        let desc = abi::RegistryEntryDesc { name: Str::new(&self.name), cell: std::ptr::null(), mode: self.mode, ops: Slice::new(&ops) };
+        unsafe { (host().reg_registry_entry)(self.reg.raw, self.registry, &desc) }
     }
 }
 
@@ -1094,16 +1146,155 @@ pub(crate) fn raw_values(list: &[Pending], scratch: &mut Vec<Vec<u8>>) -> Vec<ab
         .collect()
 }
 
+/// Declares registries and their phase dependencies during a mod's preinit callback.
+pub struct MetaRegistry {
+    raw: *mut abi::MetaRegistrar,
+}
+
+impl MetaRegistry {
+    pub(crate) fn new(raw: *mut abi::MetaRegistrar) -> Self {
+        Self { raw }
+    }
+
+    /// Declare a new registry owned by this mod and return its ordering builder.
+    pub fn registry<'a>(&'a mut self, name: impl Into<String>) -> RegistryBuilder<'a> {
+        let name = name.into();
+        unsafe { (host().meta_registry_declare)(self.raw, Str::new(&name)) };
+        RegistryBuilder { meta: self, name }
+    }
+
+    /// Contribute entries to a registry declared by another mod.
+    ///
+    /// Contributions are resolved after every mod has completed preinit, so the owner may
+    /// declare its registry before or after this call.
+    pub fn contribute_to(&mut self, registry: &str) {
+        unsafe { (host().meta_registry_contribute)(self.raw, Str::new(registry)) };
+    }
+}
+
+/// Ordering constraints attached to a newly declared registry.
+pub struct RegistryBuilder<'a> {
+    meta: &'a mut MetaRegistry,
+    name: String,
+}
+
+impl RegistryBuilder<'_> {
+    /// Freeze this registry before another registry.
+    pub fn before(self, other: &str) -> Self {
+        unsafe {
+            (host().meta_registry_before)(self.meta.raw, Str::new(&self.name), Str::new(other));
+        }
+        self
+    }
+
+    /// Freeze this registry after another registry.
+    pub fn after(self, other: &str) -> Self {
+        unsafe {
+            (host().meta_registry_after)(self.meta.raw, Str::new(&self.name), Str::new(other));
+        }
+        self
+    }
+}
+
+/// Looks up a registry by its namespaced identifier after the pre-initializer phase.
+pub fn registry_id(name: &str) -> Option<abi::RegistryId> {
+    let id = unsafe { (host().find_registry)(Str::new(name)) };
+    (id != u32::MAX).then_some(abi::RegistryId(id))
+}
+
+/// Gets a registry's namespaced identifier. The returned string is valid for the game session.
+pub fn registry_name(id: abi::RegistryId) -> Option<&'static str> {
+    let name = unsafe { (host().registry_name)(id) };
+    (name.len != 0).then(|| unsafe { name.as_str() })
+}
+
+/// Looks up a named entry in a frozen registry. Entry IDs are stable for the game session.
+pub fn registry_entry_id(registry: abi::RegistryId, name: &str) -> Option<u32> {
+    if unsafe { (host().registry_entry_count)(registry) } == u32::MAX {
+        crate::reg_mistake(&format!("registry {} has no frozen generic registry table", registry.0));
+        return None;
+    }
+    let id = unsafe { (host().find_registry_entry)(registry, Str::new(name)) };
+    (id != u32::MAX).then_some(id)
+}
+
+/// Gets the name of a frozen registry entry.
+pub fn registry_entry_name(registry: abi::RegistryId, entry: u32) -> Option<&'static str> {
+    if unsafe { (host().registry_entry_count)(registry) } == u32::MAX {
+        crate::reg_mistake(&format!("registry {} was queried before it was frozen", registry.0));
+        return None;
+    }
+    let name = unsafe { (host().registry_entry_name)(registry, entry) };
+    (name.len != 0).then(|| unsafe { name.as_str() })
+}
+
+/// Number of entries in a frozen generic registry.
+pub fn registry_entry_count(registry: abi::RegistryId) -> u32 {
+    let count = unsafe { (host().registry_entry_count)(registry) };
+    if count == u32::MAX {
+        crate::reg_mistake(&format!("registry {} was queried before it was frozen", registry.0));
+        0
+    } else {
+        count
+    }
+}
+
 pub struct Registry {
     pub(crate) raw: *mut abi::Registrar,
     pub(crate) ns: &'static str,
     /// Names given to what has none of its own (recipes, screen parts), each once.
     pub(crate) derived: Vec<String>,
+    /// Present only while a per-registry initializer is running.
+    pub(crate) registry: Option<abi::RegistryId>,
 }
 
 impl Registry {
     pub fn namespace(&self) -> &'static str {
         self.ns
+    }
+
+    /// Registers a named entry in the registry currently being initialized.
+    pub fn entry(&mut self, name: &str) -> RegistryEntryBuilder<'_> {
+        self.registry_entry(name, abi::entry_mode::NEW)
+    }
+
+    /// Edits an existing entry in the current registry, preserving its other components.
+    pub fn edit_entry(&mut self, name: &str) -> RegistryEntryBuilder<'_> {
+        self.registry_entry(name, abi::entry_mode::EDIT)
+    }
+
+    /// Replaces an existing entry in the current registry.
+    pub fn replace_entry(&mut self, name: &str) -> RegistryEntryBuilder<'_> {
+        self.registry_entry(name, abi::entry_mode::REPLACE)
+    }
+
+    /// Removes an entry from the current registry.
+    pub fn remove_entry(&mut self, name: &str) {
+        drop(self.registry_entry(name, abi::entry_mode::REMOVE));
+    }
+
+    fn registry_entry(&mut self, name: &str, mode: u32) -> RegistryEntryBuilder<'_> {
+        let Some(registry) = self.registry else {
+            crate::reg_mistake("registry entries can only be registered from declare_registry_init!");
+            return RegistryEntryBuilder::new(self, abi::RegistryId(u32::MAX), name, mode);
+        };
+        RegistryEntryBuilder::new(self, registry, name, mode)
+    }
+
+    fn find_registry(&self, name: &str) -> abi::RegistryId {
+        let id = unsafe { (host().find_registry)(Str::new(name)) };
+        if id == u32::MAX {
+            crate::reg_mistake(&format!("no registry named {name}"));
+        }
+        abi::RegistryId(id)
+    }
+
+    fn registry_entry_in(&mut self, registry: abi::RegistryId, name: &str, mode: u32) -> RegistryEntryBuilder<'_> {
+        if self.registry != Some(registry) {
+            crate::reg_mistake("entries in a declared registry can only be registered from its declare_registry_init! callback");
+            return RegistryEntryBuilder::new(self, abi::RegistryId(u32::MAX), name, mode);
+        }
+        RegistryEntryBuilder::new(self, registry, name, mode)
     }
 
     /// Whether mod `id` is loaded, to register what goes with it only then (all mods are known
@@ -1152,11 +1343,16 @@ impl Registry {
     /// As if nobody had registered `handle` (a block takes its item along, not its loot table or
     /// block entity).
     pub fn remove<K: kind::Kind>(&mut self, handle: &Handle<K>) {
+        if !<K as kind::Kind>::REGISTRY.is_empty() {
+            let registry = self.find_registry(<K as kind::Kind>::REGISTRY);
+            drop(self.registry_entry_in(registry, handle.name(), abi::entry_mode::REMOVE));
+            return;
+        }
         let mut e = crate::entry::Entry::of(handle);
         e.mode = abi::entry_mode::REMOVE;
         e.send(self);
-        if K::KIND == abi::entry_kind::BLOCK {
-            let mut item = crate::entry::Entry::new(abi::entry_kind::ITEM, handle.name().to_string());
+        if K::REGISTRY == "core:block" {
+            let mut item = crate::entry::Entry::new("core:item", handle.name().to_string());
             item.mode = abi::entry_mode::REMOVE;
             item.send(self);
         }
@@ -1196,7 +1392,7 @@ impl Registry {
     /// The item placing `block`, named like it, registered as `mode` says (`entry_mode`): the
     /// engine gives it the block's components, and without `texture` it shows the block's model.
     fn block_item(&mut self, block: &str, texture: String, mode: u32) -> ItemBuilder<'_> {
-        let mut e = crate::entry::Entry::new(abi::entry_kind::ITEM, block.to_string());
+        let mut e = crate::entry::Entry::new("core:item", block.to_string());
         e.mode = mode;
         if mode == abi::entry_mode::REMOVE {
             return ItemBuilder { reg: self, e };
@@ -1212,14 +1408,11 @@ impl Registry {
 
     /// Creative inventory tab named `tab.<ns>.<name>` in the language files, shown with `icon`.
     /// Blocks and items join with `.tab(&TAB)`; untabbed items land in a tab named after the mod.
-    /// Tabs come in mod load order, then registration order.
+    /// Must be called from the `base:creative_tab` registry callback.
     pub fn creative_tab(&mut self, tab: &'static CreativeTab, icon: &Item) -> CreativeTabBuilder<'_> {
-        self.creative_tab_entry(tab)
-            .set_text(&crate::comps::creative_tab::ICON, icon.name())
-    }
-
-    fn creative_tab_entry(&mut self, tab: &'static CreativeTab) -> CreativeTabBuilder<'_> {
-        CreativeTabBuilder { reg: self, e: crate::entry::Entry::of(tab) }
+        let registry = self.find_registry(<kind::CreativeTab as kind::Kind>::REGISTRY);
+        self.registry_entry_in(registry, tab.name(), abi::entry_mode::NEW)
+            .set_text(&CREATIVE_TAB_ICON, icon.name())
     }
 
     /// A fixed shape of blocks, drawn in layers of rows (`layer` + `key`) or filled with boxes
@@ -1231,7 +1424,8 @@ impl Registry {
 
     /// A mod's own data, for itself or an API other mods use: tags and components say what it is,
     /// and other mods `edit`, `replace` and `remove` it like anything registered. Read once the
-    /// game is loaded: `entries_with(entry_kind::RECORD, "structgen:structure")` lists them,
+    /// game is loaded: `registry_entry_id(registry_id("core:record")?, "structgen:structure")`
+    /// resolves them,
     /// `CHANCE.on_record(id)` reads one.
     ///
     /// ```ignore
@@ -1280,11 +1474,11 @@ impl Registry {
         let states = pattern
             .split_once('[')
             .is_some_and(|(_, k)| !k.trim_end_matches(']').trim().is_empty());
-        for kind in [abi::entry_kind::BLOCK, abi::entry_kind::ITEM] {
-            if kind == abi::entry_kind::ITEM && states {
+        for registry in ["core:block", "core:item"] {
+            if registry == "core:item" && states {
                 continue;
             }
-            let mut e = crate::entry::Entry::new(kind, pattern.clone());
+            let mut e = crate::entry::Entry::new(registry, pattern.clone());
             e.mode = abi::entry_mode::EDIT;
             e.ops.push(op.clone());
             e.send(self);
@@ -1337,7 +1531,7 @@ impl Registry {
     pub fn bone_motion_with_limit(&mut self, model: &str, bone: &str, motion: BoneMotion, max_angle: f32) {
         use crate::comps::bone_motion as m;
         let name = format!("{}/{bone}", crate::asset("", model));
-        let mut e = crate::entry::Entry::new(abi::entry_kind::BONE_MOTION, name);
+        let mut e = crate::entry::Entry::new("core:bone_motion", name);
         e.ops = vec![
             m::GRAVITY.raw_value(&motion.gravity),
             m::SPRING.raw_value(&motion.spring),
@@ -3976,7 +4170,7 @@ impl Registry {
             n.split_once(':').map_or(n, |x| x.1).to_string()
         };
         let name = self.derive_name(&format!("{}>{}", path(liquid), path(touching)));
-        ReactionBuilder { reg: self, e: crate::entry::Entry::new(abi::entry_kind::REACTION, name) }
+        ReactionBuilder { reg: self, e: crate::entry::Entry::new("core:reaction", name) }
             .set_text(&crate::comps::reaction::LIQUID, &liquid)
             .set_text(&crate::comps::reaction::TOUCHING, &touching)
     }

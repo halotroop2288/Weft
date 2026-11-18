@@ -218,7 +218,9 @@ pub fn register(r: &mut Registry) {
             let Some(spawn) = w.component_mut(e.player, &BED_SPAWN).filter(|s| s.set != 0) else { continue };
             let (Some(st), Some(arriving)) = (w.entity(e.player), w.component_mut(e.player, &ARRIVING)) else { continue };
             // Its mod may be gone by now.
-            let Some(dim) = dimension_from_key(spawn.dim_key).map(|d| name_of(abi::entry_kind::DIMENSION, d)) else {
+            let Some(dim) =
+                dimension_from_key(spawn.dim_key).map(|d| name_of(registry_id("core:dimension").expect("core dimension registry"), d))
+            else {
                 spawn.set = 0;
                 w.hint(MISSING, &[]).to(e.player);
                 continue;
@@ -310,7 +312,11 @@ fn arrive(w: &World, id: u64) {
     if !BED.is(state) {
         spawn.set = 0;
         w.hint(MISSING, &[]).to(id);
-        w.teleport(id, Some(Dimension::generated(name_of(abi::entry_kind::DIMENSION, a.dim).to_string())), a.from);
+        w.teleport(
+            id,
+            Some(Dimension::generated(name_of(registry_id("core:dimension").expect("core dimension registry"), a.dim).to_string())),
+            a.from,
+        );
     }
 }
 

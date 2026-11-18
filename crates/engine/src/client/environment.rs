@@ -2,6 +2,7 @@
 
 use super::textures::GameTextures;
 use super::{Client, sky};
+use crate::entries::kind as ek;
 use crate::{
     components,
     content::{Content, content},
@@ -10,7 +11,7 @@ use glam::{DVec3, Vec3};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
 use weft_abi::{
-    self as abi, entry_kind as ek,
+    self as abi,
     environment::{EnvironmentLayer as Layer, EnvironmentOverlay as Overlay, EnvironmentValues as Values},
 };
 
@@ -211,7 +212,7 @@ impl Client {
         weather.values.cloud_gray = self.look.cloud_gray;
         weather.values.cloud_dark = self.look.cloud_dark;
         env.contribute("weather".into(), weather, 1.0);
-        let weather_layers = env.layers(c, abi::entry_kind::WEATHER as usize, self.weather_id as u32);
+        let weather_layers = env.layers(c, ek::WEATHER as usize, self.weather_id as u32);
         self.environment_layers(&mut env, &weather_layers, "weather-data", 0, cam.pos);
 
         let mut cave = Layer::new("core:enclosed".into());
@@ -227,7 +228,7 @@ impl Client {
                 .block_or_air(point.floor().as_ivec3())
                 .unwrap_or(0);
             if let Some(biome) = self.world.biome_at(point.floor().as_ivec3()) {
-                let layers = env.layers(c, abi::entry_kind::BIOME as usize, biome as u32);
+                let layers = env.layers(c, ek::BIOME as usize, biome as u32);
                 for layer in layers.iter().filter(|l| l.observer == observer) {
                     self.environment_source(&mut env, format!("biome/{observer}/{biome}/{}", layer.name), layer.clone(), 0, point);
                 }
@@ -297,7 +298,7 @@ impl Client {
         }
         env.static_entities = static_entities;
         for effect in self.me.effects.iter().filter(|f| f.until > self.ticks()) {
-            let layers = env.layers(c, abi::entry_kind::ENTITY_EFFECT as usize, effect.id);
+            let layers = env.layers(c, ek::ENTITY_EFFECT as usize, effect.id);
             self.environment_layers(&mut env, &layers, &format!("effect/{}", effect.id), self.player_id, body);
         }
         for (slot, stack) in self

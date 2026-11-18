@@ -24,10 +24,11 @@ pub mod world_render;
 
 use std::time::Instant;
 
+use crate::entries::kind as ek;
 use crate::gpu_layout::Scene;
 use glam::{DVec3, IVec3, Vec2, Vec3};
 use rustc_hash::{FxHashMap, FxHashSet};
-use weft_abi::{ItemStack, block_flags as bf, entry_kind as ek};
+use weft_abi::{ItemStack, block_flags as bf};
 use weft_render::{Backend, BufferId, CommandList, FrameInfo};
 
 use crate::content::content;

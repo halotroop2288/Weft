@@ -2,8 +2,8 @@
 //! pause, death and settings screens are built from the node descriptors mods send
 //! (`ui::desc`), so a replacement can do all they do.
 
+use crate::entries::kind as ek;
 use std::rc::Rc;
-use weft_abi::entry_kind as ek;
 
 use crate::app::{Ctx, Request};
 use crate::input::{Binding, Input, Key, Trigger};
@@ -535,7 +535,7 @@ pub fn on_off(v: bool) -> Arg {
 
 // ---------------------------------------------------------------- settings mods declare
 
-/// Mods that declared settings (`entry_kind::CONFIG`).
+/// Mods that declared configuration settings.
 pub struct ModSettings;
 
 impl Screen for ModSettings {

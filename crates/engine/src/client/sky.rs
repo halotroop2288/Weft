@@ -3,9 +3,9 @@
 //! only the pixels no block covers pay for it; stars are made in the vertex shader from their
 //! number and need no buffer at all.
 
+use crate::entries::kind as ek;
 use glam::{Mat3, Vec3};
 use rustc_hash::FxHashMap;
-use weft_abi::entry_kind as ek;
 use weft_abi::sky_kind;
 use weft_render::*;
 

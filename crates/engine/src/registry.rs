@@ -3,9 +3,10 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use crate::entries::kind as ek;
 use crate::tag_bits::entity as ef;
 use rustc_hash::FxHashMap;
-use weft_abi::{self as abi, Callback, ModId, entry_kind as ek};
+use weft_abi::{self as abi, Callback, ModId};
 
 use crate::components::{self as comps, Components, RawValue};
 use crate::entries::{Entry, RawEntry, bake, bake_by};
@@ -472,7 +473,7 @@ pub struct Game {
     pub client_frames: Vec<(ModId, Callback)>,
     /// Camera modifiers after the active mode, in mod order.
     pub camera_frames: Vec<(ModId, Callback)>,
-    /// (model, bone, how it moves), from `entry_kind::BONE_MOTION`.
+    /// (model, bone, how it moves), from `core:bone_motion`.
     pub bone_motions: Vec<(String, String, crate::model::BoneMotion)>,
     /// Who says which model a stack of an item shows as (`comp::item::CONDITION`).
     pub item_model_for_stack: FxHashMap<u32, (ModId, Callback)>,
@@ -818,7 +819,7 @@ fn bake_component(e: &Entry) -> ComponentDecl {
     ComponentDecl { owner: e.owner, name: e.name.clone(), schema, entity, stack }
 }
 
-/// Every component's declaration: the engine's, then mods' (`abi::entry_kind::COMPONENT`).
+/// Every component's declaration: the engine's, then mods' (`ek::COMPONENT`).
 pub fn freeze_components(raws: &mut [RawGame], mod_name: &dyn Fn(ModId) -> String, errors: &mut Vec<String>) -> Vec<ComponentDecl> {
     let mut all = engine_components();
     all.extend(entries_of(raws, ek::COMPONENT));
@@ -1026,7 +1027,7 @@ impl SoundCategory {
 fn engine_sound_categories() -> Vec<RawEntry> {
     ["music", "blocks", "creatures", "players", "ambient", "ui"]
         .iter()
-        .map(|n| RawEntry::engine(abi::entry_kind::SOUND_CATEGORY, &format!("core:{n}")))
+        .map(|n| RawEntry::engine(ek::SOUND_CATEGORY, &format!("core:{n}")))
         .collect()
 }
 
@@ -1082,7 +1083,7 @@ fn engine_damage_causes() -> Vec<RawEntry> {
         .zip(tags)
         .zip(messages)
         .map(|((name, tags), m)| {
-            let mut e = RawEntry::engine(abi::entry_kind::DAMAGE_CAUSE, name).set(d::DEATH_MESSAGE, format!("death.{m}"));
+            let mut e = RawEntry::engine(ek::DAMAGE_CAUSE, name).set(d::DEATH_MESSAGE, format!("death.{m}"));
             if *name == "core:attack" {
                 e = e.set(d::DEATH_MESSAGE_BY, "death.attack".to_string());
             }
@@ -1221,7 +1222,7 @@ fn engine_poses() -> Vec<RawEntry> {
     use abi::comp::pose as p;
     use abi::pose_tilt as t;
     let pose = |name: &str, height: f32, eye: f32, speed: f32, tilt: u32, action: &str, priority: i32| {
-        RawEntry::engine(abi::entry_kind::POSE, &format!("core:{name}"))
+        RawEntry::engine(ek::POSE, &format!("core:{name}"))
             .set(p::HEIGHT, height)
             .set(p::EYE, eye)
             .set(p::SPEED, speed)
@@ -1274,7 +1275,7 @@ fn bake_pose(e: &Entry, conds: &mut crate::conditions::Texts) -> PoseDef {
 pub fn engine_pose_defs() -> &'static [PoseDef] {
     static DEFS: std::sync::OnceLock<Vec<PoseDef>> = std::sync::OnceLock::new();
     DEFS.get_or_init(|| {
-        let (mut defs, _) = crate::entries::bake(engine_poses(), abi::entry_kind::POSE, &|_| String::new(), &mut Vec::new(), |e, _| {
+        let (mut defs, _) = crate::entries::bake(engine_poses(), ek::POSE, &|_| String::new(), &mut Vec::new(), |e, _| {
             bake_pose(e, &mut Default::default())
         });
         let names: Vec<String> = defs.iter().map(|d| d.name.clone()).collect();
@@ -1317,7 +1318,7 @@ fn engine_game_modes() -> Vec<RawEntry> {
     let mode = |name: &str, flags: &[u32], modifiers: Vec<abi::Modifier>| {
         flags
             .iter()
-            .fold(RawEntry::engine(abi::entry_kind::GAME_MODE, name), |e, f| e.tag(tag(*f)))
+            .fold(RawEntry::engine(ek::GAME_MODE, name), |e, f| e.tag(tag(*f)))
             .set(abi::comp::MODIFIERS, modifiers)
     };
     let flies = || modifier(abi::attribute::CAN_FLY, abi::step::ADD, 1.0);
@@ -1359,7 +1360,7 @@ fn bake_game_mode(e: &Entry) -> GameModeDef {
 fn engine_precipitations() -> Vec<RawEntry> {
     use abi::comp::precipitation as p;
     let e = |name: &str, texture: &str, speed: f32, density: f32| {
-        RawEntry::engine(abi::entry_kind::PRECIPITATION, name)
+        RawEntry::engine(ek::PRECIPITATION, name)
             .set(p::TEXTURE, texture.to_string())
             .set(p::SPEED, speed)
             .set(p::DENSITY, density)
@@ -1459,7 +1460,7 @@ fn engine_categories() -> Vec<RawEntry> {
     [("core:misc", 6, 0.0f32), ("core:hostile", 8, 128.0), ("core:passive", 6, 0.0)]
         .iter()
         .map(|&(name, cap, despawn)| {
-            RawEntry::engine(abi::entry_kind::ENTITY_CATEGORY, name)
+            RawEntry::engine(ek::ENTITY_CATEGORY, name)
                 .set(c::CAP, cap as u32)
                 .set(c::DESPAWN, despawn)
         })
@@ -1569,7 +1570,7 @@ fn engine_attributes() -> Vec<RawEntry> {
     ]
     .iter()
     .map(|&(name, default, min, max)| {
-        let e = RawEntry::engine(abi::entry_kind::ATTRIBUTE, name)
+        let e = RawEntry::engine(ek::ATTRIBUTE, name)
             .set(abi::comp::attribute::DEFAULT, default)
             .set(abi::comp::attribute::RANGE, [min, max]);
         // How many hearts players (and kinds that don't say) have is the world's to say.
@@ -1645,7 +1646,7 @@ pub fn engine_entries(kind: u32) -> Vec<RawEntry> {
     }
 }
 
-/// An action players bind keys to (`entry_kind::KEY`).
+/// An action players bind keys to (`core:key`).
 pub struct KeyDef {
     pub name: String,
     pub while_held: Vec<usize>,
@@ -1937,7 +1938,7 @@ pub(crate) fn entries_of(raws: &mut [RawGame], kind: u32) -> Vec<RawEntry> {
 pub(crate) fn take_kind(all: &mut Vec<RawEntry>, kind: u32) -> Vec<RawEntry> {
     let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(all)
         .into_iter()
-        .partition(|e| e.kind == kind);
+        .partition(|e| e.registry == crate::entries::core_registry_id(kind));
     *all = rest;
     mine
 }
@@ -2999,7 +3000,7 @@ impl Game {
 fn engine_sounds() -> Vec<RawEntry> {
     use abi::comp::sound as s;
     let one = |name: &str, file: &str, category: &str, volume: f32, pitch: [f32; 2]| {
-        RawEntry::engine(abi::entry_kind::SOUND, name)
+        RawEntry::engine(ek::SOUND, name)
             .set(s::FILES, vec![file.to_string()])
             .set(s::CATEGORY, category.to_string())
             .set(s::VOLUME, volume)
@@ -3452,7 +3453,7 @@ fn engine_cameras() -> Vec<RawEntry> {
         crate::tag_bits::camera::TAGS
             .iter()
             .filter(|f| flags & f.1 != 0)
-            .fold(RawEntry::engine(abi::entry_kind::CAMERA, name), |e, f| e.tag(f.0))
+            .fold(RawEntry::engine(ek::CAMERA, name), |e, f| e.tag(f.0))
     };
     vec![
         mode("core:first_person", cf::HAND | cf::HUD | cf::EFFECTS | cf::CYCLE),

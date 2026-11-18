@@ -158,7 +158,7 @@ impl Registry {
     /// `<mod>:decoration`, `/2`.. unless `named`, for other mods' `edit` and `remove`.
     pub fn decoration(&mut self, f: impl Fn(&mut Gen) + Send + Sync + 'static) -> FeatureBuilder<'_> {
         let name = self.derive_name("decoration");
-        FeatureBuilder { reg: self, e: crate::entry::Entry::new(abi::entry_kind::FEATURE, name), reach: None }.generate(f)
+        FeatureBuilder { reg: self, e: crate::entry::Entry::new("core:feature", name), reach: None }.generate(f)
     }
 }
 

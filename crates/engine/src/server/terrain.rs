@@ -1,4 +1,4 @@
-//! Terrain described as data (`entry_kind::TERRAIN`): a base height plus height features, biome
+//! Terrain described as data (`engine terrain registry`): a base height plus height features, biome
 //! rules that pick each column's biome and surface, water and caves. The dimension's mod
 //! describes it, other mods edit it, and the merged result is evaluated here, so structures,
 //! decorations and spawn search all read the same columns from one cache.
@@ -1023,7 +1023,7 @@ mod tests {
         }
 
         fn op<V: abi::data::Data>(mut self, op: u32, name: &str, v: V, anchor: &str) -> Ops {
-            let mut o = RawEntry::engine(abi::entry_kind::TERRAIN, "")
+            let mut o = RawEntry::engine(crate::entries::kind::TERRAIN, "")
                 .set(name, v)
                 .ops
                 .remove(0);

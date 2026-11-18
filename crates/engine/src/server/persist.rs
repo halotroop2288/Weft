@@ -2,7 +2,9 @@
 //! survives mods being added, removed or reordered.
 
 use glam::{DQuat, DVec3, IVec3};
-use weft_abi::{ItemStack, component_flags as cf, entry_kind as ek};
+use weft_abi::{ItemStack, component_flags as cf};
+
+use crate::entries::kind as ek;
 
 use super::entity::{BodyMount, Completion, Entity, Stuck, StuckIn};
 use super::space::{BlockTimer, Space};

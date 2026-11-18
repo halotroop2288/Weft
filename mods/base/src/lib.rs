@@ -27,10 +27,10 @@ use weft_sdk::*;
 
 pub use base_api::{CLOUDS, FLATLANDS, MOON, OVERWORLD, STARS, SUN, tabs};
 
-declare_mod!(deps: [], init: init);
+declare_registries!(registries: ["base:creative_tab"]);
+declare_registry_init!(init_creative_tabs);
 
-fn init(r: &mut Registry) {
-    base_api::editor_methods(r);
+fn init_creative_tabs(r: &mut Registry, _: RegistryId) {
     // Vanilla's creative tabs; blocks and items join them with `.tab(..)`.
     for (tab, icon) in [
         (&tabs::BUILDING, &Item::named("bricks")),
@@ -45,6 +45,12 @@ fn init(r: &mut Registry) {
     ] {
         r.creative_tab(tab, icon);
     }
+}
+
+declare_mod!(deps: [], init: init);
+
+fn init(r: &mut Registry) {
+    base_api::editor_methods(r);
     blocks::register(r);
     commands::register(r);
     items::register(r);

@@ -8,7 +8,7 @@ use crate::content::{Pending, raw_values};
 use crate::{Handle, Registry, host, kind};
 
 pub struct Entry {
-    pub(crate) kind: u32,
+    pub(crate) registry: &'static str,
     pub(crate) name: String,
     pub(crate) cell: *const AtomicU32,
     pub(crate) mode: u32,
@@ -19,12 +19,12 @@ pub struct Entry {
 
 impl Entry {
     pub(crate) fn of<K: kind::Kind>(h: &Handle<K>) -> Entry {
-        Entry { cell: h.id_cell(), ..Entry::new(K::KIND, h.name().to_string()) }
+        Entry { cell: h.id_cell(), ..Entry::new(K::REGISTRY, h.name().to_string()) }
     }
 
     /// One no handle stands for (a sky object of a dimension, a block's loot).
-    pub(crate) fn new(kind: u32, name: String) -> Entry {
-        Entry { kind, name, cell: std::ptr::null(), mode: em::NEW, ops: Vec::new(), parts: Vec::new() }
+    pub(crate) fn new(registry: &'static str, name: String) -> Entry {
+        Entry { registry, name, cell: std::ptr::null(), mode: em::NEW, ops: Vec::new(), parts: Vec::new() }
     }
 
     pub(crate) fn send(&mut self, reg: &Registry) {
@@ -46,8 +46,13 @@ impl Entry {
             .zip(&part_ops)
             .map(|((key, _), ops)| abi::PartDesc { key: Str::new(key), ops: Slice::new(ops) })
             .collect();
+        let registry = unsafe { (host().find_registry)(Str::new(self.registry)) };
+        if registry == u32::MAX {
+            crate::error!("registry {} was not declared", self.registry);
+            return;
+        }
         let d = abi::EntryDesc {
-            kind: self.kind,
+            registry: abi::RegistryId(registry),
             name: Str::new(&self.name),
             cell: self.cell,
             mode: self.mode,

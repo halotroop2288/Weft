@@ -14,7 +14,9 @@
 
 use crate::ui::text::{Arg, Msg};
 use glam::DVec3;
-use weft_abi::{Callback, ModId, entry_kind as ek};
+use weft_abi::{Callback, ModId};
+
+use crate::entries::kind as ek;
 
 use crate::content::Content;
 

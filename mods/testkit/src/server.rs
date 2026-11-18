@@ -3,7 +3,6 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use weft_sdk::abi::entry_kind as ek;
 use weft_sdk::terrain::{BiomeRule, Expr};
 use weft_sdk::*;
 
@@ -666,7 +665,7 @@ const OPS: &[(&str, &str, Run)] = &[
             .map(|n| if n == "air" { ItemStack::EMPTY } else { ItemStack::new(Item::lookup(n).unwrap_or(0), 1) })
             .collect();
         let made = recipe_grid_output(&base_api::CRAFTING, &grid, width, height);
-        Ok(format!("{} {}", name_of(abi::entry_kind::ITEM, made.item), made.count))
+        Ok(format!("{} {}", name_of(registry_id("core:item").expect("core item registry"), made.item), made.count))
     }),
     ("seed", "<pos:pos>", |w, cmd, _, _| {
         let p = pos(cmd, "pos")?;
@@ -785,7 +784,14 @@ const OPS: &[(&str, &str, Run)] = &[
     }),
     ("entity", "@entity", |w, cmd, _, _| {
         let e = w.entity(owner(w, cmd)?).ok_or("no such entity")?;
-        Ok(format!("{} {:.2} {:.2} {:.2} {}", name_of(ek::ENTITY, e.kind), e.pos.x, e.pos.y, e.pos.z, e.health))
+        Ok(format!(
+            "{} {:.2} {:.2} {:.2} {}",
+            name_of(registry_id("core:entity").expect("core entity registry"), e.kind),
+            e.pos.x,
+            e.pos.y,
+            e.pos.z,
+            e.health
+        ))
     }),
     ("size", "@entity [width:float] [height:float]", |w, cmd, _, _| {
         let id = owner(w, cmd)?;
@@ -805,7 +811,7 @@ const OPS: &[(&str, &str, Run)] = &[
             .filter(|&&id| id != player)
             .filter_map(|&id| {
                 w.entity(id)
-                    .map(|e| format!("{id}:{}", name_of(ek::ENTITY, e.kind)))
+                    .map(|e| format!("{id}:{}", name_of(registry_id("core:entity").expect("core entity registry"), e.kind)))
             })
             .collect();
         Ok(parts.join(" "))
@@ -825,7 +831,9 @@ const OPS: &[(&str, &str, Run)] = &[
             for z in me[2] - r..=me[2] + r {
                 for x in me[0] - r..=me[0] + r {
                     let b = w.biome([x, y, z]);
-                    *biomes.entry(name_of(ek::BIOME, b)).or_default() += 1;
+                    *biomes
+                        .entry(name_of(registry_id("core:biome").expect("core biome registry"), b))
+                        .or_default() += 1;
                     if block_of(w.block([x, y, z])) == block_of(crystal) {
                         if cave.on_biome(b) { in_cave += 1 } else { elsewhere += 1 }
                     }
@@ -988,7 +996,10 @@ const OPS: &[(&str, &str, Run)] = &[
             .collect();
         drops.sort();
         let oil: Tag = Tag::named("testkit:edited");
-        let probe = |dx: i32| name_of(ek::BIOME, MARS.column(w.seed(), PROBE[0] + dx, PROBE[1]).biome) == "base:plains";
+        let probe = |dx: i32| {
+            name_of(registry_id("core:biome").expect("core biome registry"), MARS.column(w.seed(), PROBE[0] + dx, PROBE[1]).biome)
+                == "base:plains"
+        };
         let size = w
             .kind_size(EDITED_KIND.name())
             .map_or([0.0; 3], |s| [s.width, s.height, s.eye]);
@@ -1034,9 +1045,15 @@ const OPS: &[(&str, &str, Run)] = &[
     }),
     // Records with testmod's style tag: `name=weight` each, by name.
     ("records", "", |_, _, _, _| {
-        let mut out: Vec<String> = entries_with(ek::RECORD, STYLE.name())
+        let mut out: Vec<String> = entries_with(registry_id("core:record").expect("core record registry"), STYLE.name())
             .into_iter()
-            .map(|id| format!("{}={}", name_of(ek::RECORD, id), STYLE_WEIGHT.on_record(id).unwrap_or(-1.0)))
+            .map(|id| {
+                format!(
+                    "{}={}",
+                    name_of(registry_id("core:record").expect("core record registry"), id),
+                    STYLE_WEIGHT.on_record(id).unwrap_or(-1.0)
+                )
+            })
             .collect();
         out.sort();
         Ok(out.join(" "))
@@ -1046,7 +1063,7 @@ const OPS: &[(&str, &str, Run)] = &[
         let placed = PLACED.lock().unwrap();
         let parts: Vec<String> = placed
             .iter()
-            .map(|(f, p)| format!("{} {} {} {}", name_of(ek::FEATURE, *f), p.x, p.y, p.z))
+            .map(|(f, p)| format!("{} {} {} {}", name_of(registry_id("core:feature").expect("core feature registry"), *f), p.x, p.y, p.z))
             .collect();
         Ok(parts.join(", "))
     }),

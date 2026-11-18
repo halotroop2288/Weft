@@ -2,8 +2,8 @@
 //! turned and mirrored (`Transform`). They come from code, from mods' `structures/` files (ours as
 //! JSON, structgen's `.wst`) and from `/structure save`.
 
+use crate::entries::kind as ek;
 use std::sync::Arc;
-use weft_abi::entry_kind as ek;
 
 use glam::{DVec3, IVec3, Vec3};
 use rustc_hash::FxHashMap;

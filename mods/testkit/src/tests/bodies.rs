@@ -351,7 +351,7 @@ pub async fn ride_frames(t: T) -> R {
         t.c().entities().iter().copied().find(|&id| {
             t.c()
                 .entity(id)
-                .is_some_and(|e| name_of(abi::entry_kind::ENTITY, e.kind) == "core:platform")
+                .is_some_and(|e| name_of(registry_id("core:entity").expect("core entity registry"), e.kind) == "core:platform")
         })
     };
     t.until("plain body", Duration::from_secs(4), |t| platform(t).is_some())

@@ -1,7 +1,7 @@
 //! A player coming and going: its file, joining, the mode it left in.
 
 use super::*;
-use weft_abi::entry_kind as ek;
+use crate::entries::kind as ek;
 
 impl Server {
     pub(super) fn join(&mut self, c: &'static Content, pi: usize, name: String, key: String) {

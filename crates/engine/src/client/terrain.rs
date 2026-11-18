@@ -4,10 +4,10 @@
 //! generation (`ToClient::Saved`, then the cubes); those replace what was generated. Runs on its
 //! own thread and hands the client world finished cubes, a batch per round.
 
+use crate::entries::kind as ek;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use weft_abi::entry_kind as ek;
 
 use crossbeam_channel::{Receiver, Sender, select, unbounded};
 use glam::{IVec2, IVec3};

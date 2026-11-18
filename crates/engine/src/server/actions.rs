@@ -7,7 +7,7 @@ use crate::world::placement::Part;
 fn landed_hit(turn: abi::Turn, face: u8, hit: [f32; 3]) -> (u8, [f32; 3]) {
     if turn == abi::Turn::NONE || face >= 6 { (face, hit) } else { (turn.face(face as usize) as u8, turn.point(hit, 1.0)) }
 }
-use weft_abi::entry_kind as ek;
+use crate::entries::kind as ek;
 
 impl Server {
     pub(super) fn handle_messages(&mut self, c: &'static Content) {

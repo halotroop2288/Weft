@@ -4,10 +4,10 @@
 //! finished on the CPU workers. Integer math only on both sides, so a cube is the same bits
 //! whoever made it (`core:terrain_check` compares every one).
 
+use crate::entries::kind as entries;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use weft_abi::entry_kind as entries;
 
 use crossbeam_channel::{Receiver, Sender};
 use glam::IVec3;

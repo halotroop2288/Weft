@@ -4,8 +4,8 @@
 //! not loaded get it when they come (`DimSet::insert`), so an area far bigger than anything
 //! loaded costs nothing until someone goes there.
 
+use crate::entries::kind as ek;
 use std::sync::Arc;
-use weft_abi::entry_kind as ek;
 
 use glam::{DVec3, IVec2, IVec3};
 use rayon::prelude::*;

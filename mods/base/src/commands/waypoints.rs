@@ -122,7 +122,8 @@ fn teleport_to(w: &World, entity: u64, home: &mut Waypoint) -> bool {
         home.set = 0;
         return false;
     };
-    let target = (w.dimension() != dim).then(|| Dimension::generated(name_of(abi::entry_kind::DIMENSION, dim).to_string()));
+    let target = (w.dimension() != dim)
+        .then(|| Dimension::generated(name_of(registry_id("core:dimension").expect("core dimension registry"), dim).to_string()));
     w.teleport(entity, target, home.pos);
     true
 }

@@ -2429,7 +2429,7 @@ pub async fn names_translated(t: T) -> R {
             }
         }
         for id in 0.. {
-            let name = name_of(weft_sdk::abi::entry_kind::ENTITY, id);
+            let name = name_of(registry_id("core:entity").expect("core entity registry"), id);
             if name.is_empty() {
                 break;
             }

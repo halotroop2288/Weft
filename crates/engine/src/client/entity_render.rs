@@ -4,10 +4,10 @@
 
 use super::looks::ItemDraw;
 use super::models::{MAX_LAYERS, PoseLod, Posed};
+use crate::entries::kind as ek;
 use crate::gpu_layout::box_mode;
 use glam::{DVec3, IVec3, Mat4, Quat, Vec3, Vec4};
 use rustc_hash::FxHashMap;
-use weft_abi::entry_kind as ek;
 
 use super::models::{Act, Clips, Fade, Play};
 use crate::block_model::Display;

@@ -1,5 +1,6 @@
+use crate::entries::kind as ek;
 use glam::{DVec3, IVec3};
-use weft_abi::{self as abi, ParticleBurst, entry_kind as ek, ray};
+use weft_abi::{self as abi, ParticleBurst, ray};
 
 use super::{
     Client,

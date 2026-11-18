@@ -336,12 +336,12 @@ pub async fn multiplayer(t: T) -> R {
         .entities()
         .iter()
         .filter_map(|&id| t.c().entity(id))
-        .any(|e| name_of(abi::entry_kind::ENTITY, e.kind) == "core:player");
+        .any(|e| name_of(registry_id("core:entity").expect("core entity registry"), e.kind) == "core:player");
     // What they hold reaches the others, to draw it in their hand.
     if let Some(other) = t.c().entities().iter().copied().find(|&id| {
         t.c()
             .entity(id)
-            .is_some_and(|e| name_of(abi::entry_kind::ENTITY, e.kind) == "core:player")
+            .is_some_and(|e| name_of(registry_id("core:entity").expect("core entity registry"), e.kind) == "core:player")
     }) {
         t.op(&format!("put {other} 0 stone 1")).await?;
         let stone = Item::lookup("base:stone").unwrap_or(u32::MAX);

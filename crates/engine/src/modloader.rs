@@ -8,6 +8,7 @@ use rayon::prelude::*;
 use weft_abi::{self as abi, ModId};
 
 use crate::content::{self, ModMeta, RawRegistrar};
+use crate::meta_registry::{FrozenMetaRegistry, MetaRegistry};
 
 pub struct LoadedMod {
     pub id: String,
@@ -18,6 +19,83 @@ pub struct LoadedMod {
 }
 
 static NAMES: OnceLock<Vec<String>> = OnceLock::new();
+static META_REGISTRY: OnceLock<FrozenMetaRegistry> = OnceLock::new();
+static FALLBACK_META_REGISTRY: OnceLock<FrozenMetaRegistry> = OnceLock::new();
+
+/// Resolve a core registry in normal runtime, or against core-only metadata in isolated tests.
+pub(crate) fn core_registry_id(kind: u32) -> abi::RegistryId {
+    let meta = META_REGISTRY.get().unwrap_or_else(|| {
+        FALLBACK_META_REGISTRY.get_or_init(|| {
+            let mut declarations = MetaRegistry::new();
+            for &(name, runtime_kind) in CORE_REGISTRIES {
+                declarations
+                    .declare_core(name, runtime_kind)
+                    .expect("valid core registry declaration");
+            }
+            declarations
+                .freeze(&[], &[])
+                .expect("valid core registry metadata")
+        })
+    });
+    meta.registries()
+        .iter()
+        .find(|registry| registry.runtime_kind == Some(kind))
+        .map(|registry| registry.id)
+        .unwrap_or_else(|| panic!("missing core registry for runtime kind {}", crate::entries::kind_name(kind)))
+}
+
+// Engine-owned registries and the private specialized builder each registry uses.
+const CORE_REGISTRIES: &[(&str, u32)] = &[
+    ("core:block", crate::entries::kind::BLOCK),
+    ("core:item", crate::entries::kind::ITEM),
+    ("core:entity", crate::entries::kind::ENTITY),
+    ("core:biome", crate::entries::kind::BIOME),
+    ("core:dimension", crate::entries::kind::DIMENSION),
+    ("core:menu", crate::entries::kind::MENU),
+    ("core:particle", crate::entries::kind::PARTICLE),
+    ("core:config", crate::entries::kind::CONFIG),
+    ("core:sound", crate::entries::kind::SOUND),
+    ("core:damage_cause", crate::entries::kind::DAMAGE_CAUSE),
+    ("core:entity_effect", crate::entries::kind::ENTITY_EFFECT),
+    ("core:text_place", crate::entries::kind::TEXT_PLACE),
+    ("core:game_mode", crate::entries::kind::GAME_MODE),
+    ("core:pose", crate::entries::kind::POSE),
+    ("core:weather", crate::entries::kind::WEATHER),
+    ("core:precipitation", crate::entries::kind::PRECIPITATION),
+    ("core:condition", crate::entries::kind::CONDITION),
+    ("core:music", crate::entries::kind::MUSIC),
+    ("core:camera_mode", crate::entries::kind::CAMERA),
+    ("core:equipment_slot", crate::entries::kind::EQUIPMENT_SLOT),
+    ("core:sound_category", crate::entries::kind::SOUND_CATEGORY),
+    ("core:entity_category", crate::entries::kind::ENTITY_CATEGORY),
+    ("core:tint_kind", crate::entries::kind::TINT_KIND),
+    ("core:recipe_kind", crate::entries::kind::RECIPE_KIND),
+    ("core:attribute", crate::entries::kind::ATTRIBUTE),
+    ("core:key", crate::entries::kind::KEY),
+    ("core:sky_object", crate::entries::kind::SKY),
+    ("core:hud_element", crate::entries::kind::HUD_ELEMENT),
+    ("core:screen_part", crate::entries::kind::SCREEN_PART),
+    ("core:word_set", crate::entries::kind::WORDS),
+    ("core:component", crate::entries::kind::COMPONENT),
+    ("core:recipe", crate::entries::kind::RECIPE),
+    ("core:loot_table", crate::entries::kind::LOOT),
+    ("core:feature", crate::entries::kind::FEATURE),
+    ("core:liquid", crate::entries::kind::LIQUID),
+    ("core:reaction", crate::entries::kind::REACTION),
+    ("core:template", crate::entries::kind::TEMPLATE),
+    ("core:palette", crate::entries::kind::PALETTE),
+    ("core:spawn_rule", crate::entries::kind::SPAWN),
+    ("core:terrain", crate::entries::kind::TERRAIN),
+    ("core:bone_motion", crate::entries::kind::BONE_MOTION),
+    ("core:step", crate::entries::kind::STEP),
+    ("core:phase", crate::entries::kind::PHASE),
+    ("core:record", crate::entries::kind::RECORD),
+];
+
+/// Registry declarations frozen before any ordinary mod initializer runs.
+pub fn meta_registry() -> Option<&'static FrozenMetaRegistry> {
+    META_REGISTRY.get()
+}
 /// Each loaded mod's assets folder by its id, for `asset_exists` while mods register.
 static ASSET_ROOTS: std::sync::RwLock<Vec<(String, std::path::PathBuf)>> = std::sync::RwLock::new(Vec::new());
 
@@ -591,14 +669,223 @@ pub fn load(
         .iter()
         .map(|m| (m.id.clone(), m.assets.clone()))
         .collect();
+
+    // Collect every registry declaration before resolving contributions. Registry phase order
+    // is resolved from the meta-registry dependency graph, never filesystem configuration.
+    let mut meta_registry = MetaRegistry::new();
+    for &(name, runtime_kind) in CORE_REGISTRIES {
+        meta_registry
+            .declare_core(name, runtime_kind)
+            .map_err(|e| format!("engine: {e}"))?;
+    }
+    let mut contributions = Vec::new();
+
+    // Run every mod's preinit before resolving contributions, so declarations and ordering
+    // constraints may refer to registries declared by mods loaded later.
+    for (i, m) in mods.iter().enumerate() {
+        let Some(preinit) = m.decl.preinit else { continue };
+        let owner = ModId(i as u32);
+        let mut registrar = crate::host::RawMetaRegistrar::new(&mut meta_registry, owner);
+        let result = unsafe { preinit(&crate::host::HOST, owner, &mut registrar as *mut _ as *mut abi::MetaRegistrar) };
+        if result != 0 {
+            registrar.errors.push("preinit panicked".into());
+        }
+        if !registrar.errors.is_empty() {
+            return Err(format!("mod {}: {}", m.id, registrar.errors.join("\n")));
+        }
+        contributions.extend(
+            registrar
+                .contributions
+                .into_iter()
+                .map(|registry| (registry, owner, m.id.clone())),
+        );
+    }
+
+    for (i, m) in mods.iter().enumerate() {
+        let declarations = unsafe {
+            m._lib
+                .get::<unsafe extern "C" fn() -> abi::RegistryDeclarations>(abi::REGISTRY_SYMBOL)
+                .ok()
+                .map(|symbol| symbol())
+        };
+        let Some(declarations) = declarations else { continue };
+        let contributes_to = unsafe { declarations.contributes_to.as_slice() };
+        if !contributes_to.is_empty()
+            && unsafe {
+                m._lib
+                    .get::<unsafe extern "C" fn(*const abi::Host, ModId, abi::RegistryId, *mut abi::Registrar) -> u32>(
+                        abi::REGISTRY_INIT_SYMBOL,
+                    )
+                    .is_err()
+            }
+        {
+            return Err(format!("mod {} declares registry contributions but does not export weft_registry_init", m.id));
+        }
+        for registry in unsafe { declarations.registries.as_slice() } {
+            let name = unsafe { registry.as_str() };
+            meta_registry
+                .declare(name, ModId(i as u32))
+                .map_err(|e| format!("mod {}: {e}", m.id))?;
+        }
+        for registry in unsafe { declarations.contributes_to.as_slice() } {
+            contributions.push((unsafe { registry.as_str() }.to_string(), ModId(i as u32), m.id.clone()));
+        }
+    }
+    for (registry, contributor, mod_name) in &contributions {
+        if mods.get(contributor.0 as usize).is_some_and(|m| unsafe {
+            m._lib
+                .get::<unsafe extern "C" fn(*const abi::Host, ModId, abi::RegistryId, *mut abi::Registrar) -> u32>(
+                    abi::REGISTRY_INIT_SYMBOL,
+                )
+                .is_err()
+        }) {
+            return Err(format!("mod {mod_name} contributes to {registry} but does not export weft_registry_init"));
+        }
+    }
+    for (registry, contributor, mod_name) in contributions {
+        meta_registry
+            .contribute(&registry, contributor)
+            .map_err(|e| format!("mod {mod_name}: {e}"))?;
+    }
+
+    let mod_ranks = content::load_order(&metas);
+    let mut mod_indices = (0..mods.len()).collect::<Vec<_>>();
+    mod_indices.sort_by_key(|&i| mod_ranks[i]);
+    let mod_order = mod_indices
+        .into_iter()
+        .map(|i| ModId(i as u32))
+        .collect::<Vec<_>>();
+    let frozen_meta = meta_registry.freeze(&[], &mod_order).map_err(|errors| {
+        errors
+            .into_iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+    META_REGISTRY
+        .set(frozen_meta)
+        .map_err(|_| "meta-registry was initialized more than once".to_string())?;
+
+    // Registry callbacks execute and freeze one phase at a time. A later phase can read
+    // only registries already published by this loop.
+    let frozen_meta = META_REGISTRY.get().expect("meta-registry frozen above");
+    let mut regs: Vec<RawRegistrar> = (0..mods.len())
+        .map(|i| RawRegistrar::new(ModId(i as u32)))
+        .collect();
+    let mut registry_entries = rustc_hash::FxHashMap::default();
+    let mut registry_component_schemas: rustc_hash::FxHashMap<String, (String, String, String)> = rustc_hash::FxHashMap::default();
+    let mod_name = |id: ModId| {
+        mods.get(id.0 as usize)
+            .map_or("the engine".to_string(), |m| m.id.clone())
+    };
+
+    for &registry_id in frozen_meta.load_order() {
+        let descriptor = frozen_meta
+            .registry(registry_id)
+            .expect("registry id from load order");
+
+        // All contributors run before this registry is folded or published.
+        let mut phase_errors = Vec::new();
+        for &contributor in &descriptor.contributors {
+            let Some(m) = mods.get(contributor.0 as usize) else { continue };
+            let Some(init) = (unsafe {
+                m._lib
+                    .get::<unsafe extern "C" fn(*const abi::Host, ModId, abi::RegistryId, *mut abi::Registrar) -> u32>(
+                        abi::REGISTRY_INIT_SYMBOL,
+                    )
+                    .ok()
+                    .map(|symbol| *symbol)
+            }) else {
+                continue;
+            };
+            let reg = &mut regs[contributor.0 as usize];
+            let start = Instant::now();
+            reg.active_registry = Some(registry_id);
+            let result = unsafe { init(&crate::host::HOST, contributor, registry_id, reg as *mut _ as *mut abi::Registrar) };
+            reg.active_registry = None;
+            if result != 0 {
+                reg.errors
+                    .push(format!("registry initializer for {} panicked", descriptor.name));
+            }
+            phase_errors.extend(
+                std::mem::take(&mut reg.errors)
+                    .into_iter()
+                    .map(|error| format!("{}: {error}", m.id)),
+            );
+            log::debug!("{} contributed to {} in {:.1} ms", m.id, descriptor.name, start.elapsed().as_secs_f64() * 1000.0);
+        }
+        if !phase_errors.is_empty() {
+            return Err(phase_errors.join("\n"));
+        }
+
+        // Drain this phase's contributions in mod load order. Contributions aimed at another
+        // phase remain queued until that phase is active.
+        let mut raw = Vec::new();
+        for &contributor in &descriptor.contributors {
+            let Some(reg) = regs.get_mut(contributor.0 as usize) else { continue };
+            let mut pending = Vec::new();
+            for contribution in std::mem::take(&mut reg.registry_entries) {
+                if contribution.registry == registry_id {
+                    raw.push(contribution.entry);
+                } else {
+                    pending.push(contribution);
+                }
+            }
+            reg.registry_entries = pending;
+        }
+
+        if descriptor.runtime_kind.is_none() {
+            let contents = content::freeze_registry(&descriptor.name, raw, &mod_name).map_err(|errors| errors.join("\n"))?;
+            let mut schema_errors = Vec::new();
+            for entry in &contents.entries {
+                for value in &entry.values {
+                    match registry_component_schemas.get(&value.name) {
+                        Some((schema, first_registry, first_entry)) if schema != &value.schema => {
+                            schema_errors.push(format!(
+                                "registry {}: component {} has schema {} on {}, but {} was declared by registry {} entry {}",
+                                descriptor.name, value.name, value.schema, entry.name, schema, first_registry, first_entry
+                            ));
+                        }
+                        Some(_) => {}
+                        None => {
+                            registry_component_schemas
+                                .insert(value.name.clone(), (value.schema.clone(), descriptor.name.clone(), entry.name.clone()));
+                        }
+                    }
+                }
+            }
+            if !schema_errors.is_empty() {
+                return Err(schema_errors.join("\n"));
+            }
+            content::publish_registry(registry_id, contents.clone())?;
+            registry_entries.insert(registry_id, contents);
+        } else if !raw.is_empty() {
+            return Err(format!("specialized registry {} received generic entries", descriptor.name));
+        }
+    }
+
+    // A callback may not write into a registry whose phase has already passed, or contribute
+    // to a registry it was not declared for.
+    let mut late_errors = Vec::new();
+    for reg in &mut regs {
+        for contribution in std::mem::take(&mut reg.registry_entries) {
+            let name = frozen_meta
+                .registry(contribution.registry)
+                .map_or_else(|| format!("#{}", contribution.registry.0), |d| d.name.clone());
+            late_errors.push(format!("{}: registered entries for {name} outside its active registry phase", mod_name(reg.owner)));
+        }
+    }
+    if !late_errors.is_empty() {
+        return Err(late_errors.join("\n"));
+    }
+
     let regs: Vec<RawRegistrar> = mods
         .par_iter()
-        .enumerate()
-        .map(|(i, m)| {
-            let mut reg = RawRegistrar::new(ModId(i as u32));
+        .zip(regs.into_par_iter())
+        .map(|(m, mut reg)| {
             let t = Instant::now();
-            let r = unsafe { (m.decl.init)(&crate::host::HOST, ModId(i as u32), &mut reg as *mut _ as *mut abi::Registrar) };
-            if r != 0 {
+            let result = unsafe { (m.decl.init)(&crate::host::HOST, reg.owner, &mut reg as *mut _ as *mut abi::Registrar) };
+            if result != 0 {
                 reg.errors.push("init panicked".into());
             }
             log::debug!("{} registered in {:.1} ms", m.id, t.elapsed().as_secs_f64() * 1000.0);
@@ -607,7 +894,8 @@ pub fn load(
         .collect();
 
     let step_order = std::fs::read_to_string(off_file.with_file_name("step_order.txt")).unwrap_or_default();
-    let content = content::freeze(metas, regs, &step_order, core_assets).map_err(|e| e.join("\n"))?;
+    let content =
+        content::freeze(metas, regs, (*frozen_meta).clone(), registry_entries, &step_order, core_assets).map_err(|e| e.join("\n"))?;
     log::info!(
         "{} mods, {} blocks ({} states), {} items, {} dimensions in {:.1} ms",
         mods.len(),

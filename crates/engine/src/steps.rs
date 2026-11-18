@@ -3,8 +3,9 @@
 //! set the rest by hand (`config/step_order.txt`). Steps and phases are entries, so a mod edits,
 //! replaces or removes anyone's, the engine's too.
 
+use crate::entries::kind as ek;
 use rustc_hash::FxHashMap;
-use weft_abi::{self as abi, Callback, ModId, entry_kind as ek};
+use weft_abi::{self as abi, Callback, ModId};
 
 use crate::content::Content;
 use crate::entries::{Entry, RawEntry};

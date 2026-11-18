@@ -614,7 +614,7 @@ fn found_recipes(q: &RecipeQuery) -> Vec<(&'static str, Vec<usize>)> {
             .filter(|(_, r)| {
                 hidden.is_none_or(|h| {
                     !c.components
-                        .has(weft_abi::entry_kind::RECIPE as usize, r.entry, h)
+                        .has(crate::entries::kind::RECIPE as usize, r.entry, h)
                 })
             })
             .filter(|(_, r)| match q {
@@ -858,7 +858,7 @@ fn info_args(def: &crate::registry::RecipeKindDef, r: &crate::registry::Recipe) 
                 .map_or("", String::as_str);
             let b = c
                 .components
-                .bytes(weft_abi::entry_kind::RECIPE as usize, r.entry, id)
+                .bytes(crate::entries::kind::RECIPE as usize, r.entry, id)
                 .unwrap_or(&[]);
             let num = |n: usize| b.get(..n).map(|s| s.to_vec());
             match schema {

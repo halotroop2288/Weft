@@ -16,10 +16,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::entries::kind as ek;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use glam::{DVec3, IVec2, Mat4};
 use rustc_hash::{FxHashMap, FxHashSet};
-use weft_abi::{BlockModel, FACE_DIRS, entry_kind as ek};
+use weft_abi::{BlockModel, FACE_DIRS};
 
 use crate::background;
 use crate::config;

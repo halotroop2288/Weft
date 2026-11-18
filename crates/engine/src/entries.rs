@@ -7,6 +7,104 @@ use weft_abi::{self as abi, ModId, data, entry_mode as em, value_op as vo};
 
 use crate::components::RawValue;
 
+/// Engine-private dispatch kinds for specialized content builders. Mods identify registries
+/// exclusively by RegistryId; these slots only organize the engine's existing runtime pipelines.
+pub mod kind {
+    pub const BLOCK: u32 = 0;
+    pub const ITEM: u32 = 1;
+    pub const ENTITY: u32 = 2;
+    pub const BIOME: u32 = 3;
+    pub const DIMENSION: u32 = 4;
+    pub const MENU: u32 = 5;
+    pub const PARTICLE: u32 = 6;
+    pub const CONFIG: u32 = 7;
+    pub const SOUND: u32 = 8;
+    pub const DAMAGE_CAUSE: u32 = 9;
+    pub const ENTITY_EFFECT: u32 = 10;
+    pub const TEXT_PLACE: u32 = 11;
+    pub const GAME_MODE: u32 = 12;
+    pub const POSE: u32 = 13;
+    pub const WEATHER: u32 = 14;
+    pub const PRECIPITATION: u32 = 15;
+    pub const CONDITION: u32 = 16;
+    pub const MUSIC: u32 = 17;
+    pub const CAMERA: u32 = 18;
+    pub const EQUIPMENT_SLOT: u32 = 19;
+    pub const CREATIVE_TAB: u32 = 20;
+    pub const SOUND_CATEGORY: u32 = 21;
+    pub const ENTITY_CATEGORY: u32 = 22;
+    pub const TINT_KIND: u32 = 23;
+    pub const RECIPE_KIND: u32 = 24;
+    pub const ATTRIBUTE: u32 = 25;
+    pub const KEY: u32 = 26;
+    pub const SKY: u32 = 27;
+    pub const HUD_ELEMENT: u32 = 28;
+    pub const SCREEN_PART: u32 = 29;
+    pub const WORDS: u32 = 30;
+    pub const COMPONENT: u32 = 31;
+    pub const RECIPE: u32 = 32;
+    pub const LOOT: u32 = 33;
+    pub const FEATURE: u32 = 34;
+    pub const LIQUID: u32 = 35;
+    pub const REACTION: u32 = 36;
+    pub const TEMPLATE: u32 = 37;
+    pub const PALETTE: u32 = 38;
+    pub const SPAWN: u32 = 39;
+    pub const TERRAIN: u32 = 40;
+    pub const BONE_MOTION: u32 = 41;
+    pub const STEP: u32 = 42;
+    pub const PHASE: u32 = 43;
+    pub const RECORD: u32 = 44;
+    pub const COUNT: usize = 45;
+    pub const NAMES: [&str; COUNT] = [
+        "block",
+        "item",
+        "entity",
+        "biome",
+        "dimension",
+        "menu",
+        "particle",
+        "config",
+        "sound",
+        "damage cause",
+        "entity effect",
+        "text place",
+        "game mode",
+        "pose",
+        "weather",
+        "precipitation",
+        "condition",
+        "music",
+        "camera mode",
+        "equipment slot",
+        "creative tab",
+        "sound category",
+        "entity category",
+        "tint kind",
+        "recipe kind",
+        "attribute",
+        "key",
+        "sky object",
+        "HUD element",
+        "screen part",
+        "word set",
+        "component",
+        "recipe",
+        "loot table",
+        "feature",
+        "liquid",
+        "liquid reaction",
+        "template",
+        "palette",
+        "spawn rule",
+        "terrain",
+        "bone motion",
+        "step",
+        "phase",
+        "record",
+    ];
+}
+
 #[derive(Clone, Debug)]
 pub struct RawOp {
     pub op: u32,
@@ -18,7 +116,7 @@ pub struct RawOp {
 #[derive(Clone, Debug)]
 pub struct RawEntry {
     pub owner: ModId,
-    pub kind: u32,
+    pub registry: abi::RegistryId,
     pub name: String,
     pub cell: usize,
     pub mode: u32,
@@ -28,8 +126,16 @@ pub struct RawEntry {
 
 impl RawEntry {
     /// One of the engine's own, before every mod's.
-    pub fn engine(kind: u32, name: &str) -> RawEntry {
-        RawEntry { owner: ModId(u32::MAX), kind, name: name.to_string(), cell: 0, mode: em::NEW, ops: Vec::new(), parts: Vec::new() }
+    pub fn engine(runtime_kind: u32, name: &str) -> RawEntry {
+        RawEntry {
+            owner: ModId(u32::MAX),
+            registry: core_registry_id(runtime_kind),
+            name: name.to_string(),
+            cell: 0,
+            mode: em::NEW,
+            ops: Vec::new(),
+            parts: Vec::new(),
+        }
     }
 
     pub fn set<T: data::Data>(mut self, name: &str, v: T) -> RawEntry {
@@ -46,7 +152,7 @@ impl RawEntry {
 
     /// # Safety
     /// The descriptor's pointers must be valid for this call.
-    pub unsafe fn copy(owner: ModId, d: &abi::EntryDesc) -> RawEntry {
+    pub unsafe fn copy(owner: ModId, registry: abi::RegistryId, d: &abi::EntryDesc) -> RawEntry {
         unsafe {
             let ops = |s: abi::Slice<abi::ValueOp>| -> Vec<RawOp> {
                 s.as_slice()
@@ -56,7 +162,7 @@ impl RawEntry {
             };
             RawEntry {
                 owner,
-                kind: d.kind,
+                registry,
                 name: d.name.as_str().to_string(),
                 cell: d.cell as usize,
                 mode: d.mode,
@@ -70,6 +176,41 @@ impl RawEntry {
             }
         }
     }
+}
+
+/// One contribution to a dynamically declared registry.
+#[derive(Clone, Debug)]
+pub struct RawRegistryEntry {
+    pub registry: abi::RegistryId,
+    pub entry: RawEntry,
+}
+
+impl RawRegistryEntry {
+    /// # Safety
+    /// The descriptor's pointers must be valid for this call.
+    pub unsafe fn copy(owner: ModId, registry: abi::RegistryId, d: &abi::RegistryEntryDesc) -> Self {
+        let entry = RawEntry {
+            owner,
+            registry,
+            name: unsafe { d.name.as_str() }.to_string(),
+            cell: d.cell as usize,
+            mode: d.mode,
+            ops: unsafe {
+                d.ops
+                    .as_slice()
+                    .iter()
+                    .map(|o| RawOp { op: o.op, value: RawValue::copy(&o.value), anchor: o.anchor.as_str().to_string() })
+                    .collect()
+            },
+            parts: Vec::new(),
+        };
+        Self { registry, entry }
+    }
+}
+
+/// Resolve a built-in registry ID from its engine-private specialized builder slot.
+pub(crate) fn core_registry_id(kind: u32) -> abi::RegistryId {
+    crate::modloader::core_registry_id(kind)
 }
 
 /// `T::schema()`, worked out once: a packed struct's is built of its fields' every time.
@@ -299,10 +440,7 @@ pub fn bake_by<D, K: Ord>(
 }
 
 pub fn kind_name(kind: u32) -> &'static str {
-    abi::entry_kind::NAMES
-        .get(kind as usize)
-        .copied()
-        .unwrap_or("entry")
+    kind::NAMES.get(kind as usize).copied().unwrap_or("entry")
 }
 
 /// The rest of `bake_by`, for a kind folded early (what liquids' heat says of their blocks).
@@ -337,22 +475,30 @@ fn order<K: Ord>(mut f: Folded, errors: &mut Vec<String>, key: impl FnMut(&Entry
 /// theirs would have to exist before them; word sets are only lists of words for commands.
 /// Everything else has one by entry: what the game makes of an entry (a recipe expanded per
 /// material, an ore copied into each dimension) keeps the entry's number to read it by.
-pub const NO_TABLE: [u32; 2] = [abi::entry_kind::WORDS, abi::entry_kind::COMPONENT];
+pub const NO_TABLE: [u32; 2] = [kind::WORDS, kind::COMPONENT];
 
 /// Kinds baked through here keep their entries, in id order, for their component tables
 /// (`Components::add_table`).
 #[derive(Default)]
-pub struct Tables(pub Vec<(u32, Vec<Entry>)>, pub Catalog);
+pub struct Tables(pub Vec<(abi::RegistryId, Vec<Entry>)>, pub Catalog);
 
 pub type Names = std::sync::Arc<FxHashMap<String, u32>>;
 
 #[derive(Default)]
-pub struct Catalog(FxHashMap<u32, (Vec<String>, Names)>);
+pub struct Catalog(FxHashMap<abi::RegistryId, (Vec<String>, Names)>);
 
 impl Catalog {
+    fn registry(kind: u32) -> abi::RegistryId {
+        core_registry_id(kind)
+    }
+
     pub fn set<'a>(&mut self, kind: u32, names: impl IntoIterator<Item = &'a str>) -> Names {
-        self.set_ids(
-            kind,
+        self.set_registry(Self::registry(kind), names)
+    }
+
+    pub fn set_registry<'a>(&mut self, registry: abi::RegistryId, names: impl IntoIterator<Item = &'a str>) -> Names {
+        self.set_registry_ids(
+            registry,
             names
                 .into_iter()
                 .enumerate()
@@ -362,22 +508,27 @@ impl Catalog {
     }
 
     pub fn set_ids(&mut self, kind: u32, ids: FxHashMap<String, u32>) -> Names {
+        self.set_registry_ids(Self::registry(kind), ids)
+    }
+
+    pub fn set_registry_ids(&mut self, registry: abi::RegistryId, ids: FxHashMap<String, u32>) -> Names {
         let mut names = vec![String::new(); ids.len()];
         for (name, &id) in &ids {
             names[id as usize] = name.clone();
         }
         let ids = Names::new(ids);
-        self.0.insert(kind, (names, ids.clone()));
+        self.0.insert(registry, (names, ids.clone()));
         ids
     }
 
     pub fn ids(&self, kind: u32) -> &FxHashMap<String, u32> {
-        &self.0[&kind].1
+        &self.0[&Self::registry(kind)].1
     }
 
     /// Bind handles and component rows to the final identities, including generated entries.
     pub fn bind(&self, kind: u32, entries: &mut Vec<Entry>) {
-        let mut rows: Vec<_> = self.0[&kind]
+        let registry = Self::registry(kind);
+        let mut rows: Vec<_> = self.0[&registry]
             .0
             .iter()
             .map(|name| Entry { name: name.clone(), owner: ModId(u32::MAX), ..Default::default() })
@@ -393,11 +544,15 @@ impl Catalog {
     }
 
     pub fn find(&self, kind: u32, name: &str) -> Option<u32> {
-        self.0.get(&kind)?.1.get(name).copied()
+        self.0.get(&Self::registry(kind))?.1.get(name).copied()
     }
 
     pub fn name(&self, kind: u32, id: u32) -> Option<&str> {
-        self.0.get(&kind)?.0.get(id as usize).map(String::as_str)
+        self.0
+            .get(&Self::registry(kind))?
+            .0
+            .get(id as usize)
+            .map(String::as_str)
     }
 }
 
@@ -438,7 +593,7 @@ impl Tables {
         let (entries, names) = order(f, errors, key);
         let out = entries.iter().map(|e| make(e, errors)).collect();
         let names = self.1.set_ids(kind, names);
-        self.0.push((kind, entries));
+        self.0.push((core_registry_id(kind), entries));
         (out, names)
     }
 }
@@ -468,7 +623,7 @@ pub fn fold(kind: &str, raw: Vec<RawEntry>, mod_name: &dyn Fn(ModId) -> String, 
     let mut patterns: Vec<RawEntry> = Vec::new();
     let mut gone_cells: Vec<usize> = Vec::new();
     for (seq, mut e) in raw.into_iter().enumerate() {
-        if e.kind == abi::entry_kind::BLOCK && e.mode != em::REMOVE && !is_pattern(&e.name) {
+        if kind == kind_name(kind::BLOCK) && e.mode != em::REMOVE && !is_pattern(&e.name) {
             let ops = std::mem::take(&mut e.ops);
             e.ops = ops
                 .iter()
@@ -599,7 +754,7 @@ mod tests {
     }
 
     fn entry(owner: u32, name: &str, mode: u32, ops: Vec<RawOp>) -> RawEntry {
-        RawEntry { owner: ModId(owner), kind: abi::entry_kind::ITEM, name: name.into(), cell: 0, mode, ops, parts: Vec::new() }
+        RawEntry { owner: ModId(owner), registry: abi::RegistryId(kind::ITEM), name: name.into(), cell: 0, mode, ops, parts: Vec::new() }
     }
 
     #[test]
@@ -621,6 +776,22 @@ mod tests {
         assert_eq!(f.entries[0].get::<u32>("size"), Some(2));
         assert_eq!((f.entries[1].get::<u32>("speed"), f.entries[1].get::<u32>("size")), (None, Some(7)));
         assert_eq!(errors.len(), 1, "{errors:?}");
+    }
+
+    #[test]
+    fn generic_registry_entries_fold_without_builtin_kind_ids() {
+        let base = entry(1, "arcana:ember", em::NEW, vec![set("power", 3)]);
+        let edit = entry(2, "arcana:ember", em::EDIT, vec![set("power", 9), set("label", 1)]);
+
+        let mut errors = Vec::new();
+        let mut folded = fold("arcana:spell", vec![base, edit], &|m| format!("mod{}", m.0), &mut errors);
+        folded.report_missing(&mut errors);
+        let _ = folded.apply_patterns(&mut errors);
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(folded.entries.len(), 1);
+        assert_eq!(folded.entries[0].get::<u32>("power"), Some(9));
+        assert_eq!(folded.entries[0].get::<u32>("label"), Some(1));
     }
 
     #[test]
@@ -677,4 +848,34 @@ pub fn dependency_order<K: Ord>(edges: &[Vec<usize>], key: impl Fn(usize) -> K, 
         .filter(|&i| needs[i] != usize::MAX)
         .collect();
     (out, rest)
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+
+    #[test]
+    fn catalog_accepts_non_core_registry_ids() {
+        let registry = abi::RegistryId(10_000);
+        let mut catalog = Catalog::default();
+
+        catalog.set_registry(registry, ["base:building", "base:decorations"]);
+
+        assert!(catalog.0.contains_key(&registry));
+        let (names, ids) = &catalog.0[&registry];
+        assert_eq!(ids.get("base:decorations"), Some(&1));
+        assert_eq!(names[0], "base:building");
+    }
+
+    #[test]
+    fn catalog_storage_uses_registry_ids() {
+        let registry = core_registry_id(kind::ITEM);
+        let mut catalog = Catalog::default();
+
+        catalog.set(kind::ITEM, ["core:air", "core:stone"]);
+
+        assert!(catalog.0.contains_key(&registry));
+        assert_eq!(catalog.find(kind::ITEM, "core:stone"), Some(1));
+        assert_eq!(catalog.name(kind::ITEM, 1), Some("core:stone"));
+    }
 }

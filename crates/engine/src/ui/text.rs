@@ -25,8 +25,8 @@
 
 use super::font::Font;
 use super::lang::Lang;
+use crate::entries::kind as ek;
 use crate::input::{Input, key_name};
-use weft_abi::entry_kind as ek;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Arg {

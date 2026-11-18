@@ -20,6 +20,10 @@ use core::sync::atomic::AtomicU32;
 pub const ABI_VERSION: u64 = fnv(concat!(include_str!("lib.rs"), include_str!("data.rs"), include_str!("editor.rs")).as_bytes());
 /// Symbol every mod library exports: `extern "C" fn() -> *const ModDecl`.
 pub const ENTRY_SYMBOL: &[u8] = b"weft_mod\0";
+/// Optional symbol for static pre-initializer registry declarations: `extern "C" fn() -> RegistryDeclarations`.
+pub const REGISTRY_SYMBOL: &[u8] = b"weft_registries\0";
+/// Optional symbol for the per-registry content callback: `extern "C" fn(*const Host, ModId, RegistryId, *mut Registrar) -> u32`.
+pub const REGISTRY_INIT_SYMBOL: &[u8] = b"weft_registry_init\0";
 
 pub const fn fnv(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -221,6 +225,21 @@ pub struct Slice<T> {
 unsafe impl<T: Sync> Sync for Slice<T> {}
 unsafe impl<T: Send> Send for Slice<T> {}
 
+/// Static declarations exported by a mod before any content initializer runs.
+///
+/// `registries` are owned by the exporting mod. `contributes_to` lists registries declared
+/// by other mods to which this mod will contribute entries during registry loading.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RegistryDeclarations {
+    pub registries: Slice<Str>,
+    pub contributes_to: Slice<Str>,
+}
+
+impl RegistryDeclarations {
+    pub const EMPTY: Self = Self { registries: Slice::EMPTY, contributes_to: Slice::EMPTY };
+}
+
 impl<T> Slice<T> {
     pub const EMPTY: Slice<T> = Slice { ptr: core::ptr::null(), len: 0 };
 
@@ -279,9 +298,20 @@ impl Callback {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ModId(pub u32);
 
+/// Runtime identity of a registry declared through the meta-registry.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RegistryId(pub u32);
+
 /// Opaque per-mod registration container.
 #[repr(C)]
 pub struct Registrar {
+    _p: [u8; 0],
+}
+
+/// Opaque container used only while a mod declares registries in preinit.
+#[repr(C)]
+pub struct MetaRegistrar {
     _p: [u8; 0],
 }
 
@@ -308,6 +338,8 @@ pub struct ModDecl {
     pub after: Slice<Str>,
     /// Mod ids this one loads before if they are there: theirs win.
     pub before: Slice<Str>,
+    /// Registry declarations and ordering constraints, before any registry content is loaded.
+    pub preinit: Option<unsafe extern "C" fn(host: *const Host, me: ModId, reg: *mut MetaRegistrar) -> u32>,
     pub init: unsafe extern "C" fn(host: *const Host, me: ModId, reg: *mut Registrar) -> u32,
 }
 
@@ -376,11 +408,12 @@ pub struct PartDesc {
     pub ops: Slice<ValueOp>,
 }
 
-/// Everything a mod registers: an entry of a kind (`entry_kind`), by name, made of components.
+/// Everything a mod registers: an entry in a meta-registry registry, by name, made of components.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct EntryDesc {
-    pub kind: u32,
+    /// Target registry, declared by a mod or by the engine's core metadata.
+    pub registry: RegistryId,
     pub name: Str,
     /// The handle's id cell, filled at freeze; null for none.
     pub cell: *const AtomicU32,
@@ -391,132 +424,26 @@ pub struct EntryDesc {
     pub parts: Slice<PartDesc>,
 }
 
-/// Registry kinds for `Host::find`; the first `COUNT` also have component tables (blocks per state).
-pub mod entry_kind {
-    pub const BLOCK: u32 = 0;
-    pub const ITEM: u32 = 1;
-    pub const ENTITY: u32 = 2;
-    pub const BIOME: u32 = 3;
-    pub const DIMENSION: u32 = 4;
-    pub const MENU: u32 = 5;
-    pub const PARTICLE: u32 = 6;
-    pub const CONFIG: u32 = 7;
-    pub const SOUND: u32 = 8;
-    pub const DAMAGE_CAUSE: u32 = 9;
-    pub const ENTITY_EFFECT: u32 = 10;
-    pub const TEXT_PLACE: u32 = 11;
-    pub const GAME_MODE: u32 = 12;
-    pub const POSE: u32 = 13;
-    pub const WEATHER: u32 = 14;
-    pub const PRECIPITATION: u32 = 15;
-    pub const CONDITION: u32 = 16;
-    pub const MUSIC: u32 = 17;
-    pub const CAMERA: u32 = 18;
-    pub const EQUIPMENT_SLOT: u32 = 19;
-    pub const CREATIVE_TAB: u32 = 20;
-    pub const SOUND_CATEGORY: u32 = 21;
-    pub const ENTITY_CATEGORY: u32 = 22;
-    pub const TINT_KIND: u32 = 23;
-    pub const RECIPE_KIND: u32 = 24;
-    pub const ATTRIBUTE: u32 = 25;
-    pub const KEY: u32 = 26;
-    /// Named `<dimension>/<object>`, both full names.
-    pub const SKY: u32 = 27;
-    pub const HUD_ELEMENT: u32 = 28;
-    pub const SCREEN_PART: u32 = 29;
-    pub const WORDS: u32 = 30;
-    /// A component's declaration, by the component's name.
-    pub const COMPONENT: u32 = 31;
-    pub const RECIPE: u32 = 32;
-    /// Named like the block or entity kind that drops it, or a table of its own.
-    pub const LOOT: u32 = 33;
-    /// Anything generation puts into the world (`comp::feature`): an ore is named like its block,
-    /// a structure like its template, a decoration `<mod>:decoration`, `/2`.. by default.
-    pub const FEATURE: u32 = 34;
-    /// Named like its block (16 states, see `comp::liquid`).
-    pub const LIQUID: u32 = 35;
-    /// What happens where two liquids meet, `<mod>:<liquid>><touching>` by default.
-    pub const REACTION: u32 = 36;
-    pub const TEMPLATE: u32 = 37;
-    /// Blocks for templates' material slots (`comp::palette`).
-    pub const PALETTE: u32 = 38;
-    /// A natural spawning rule, `<mod>:<entity>`, `/2`.. by default.
-    pub const SPAWN: u32 = 39;
-    /// A dimension's terrain, named like the dimension.
-    pub const TERRAIN: u32 = 40;
-    /// How a bone of a model file moves by itself, named `<model>/<bone>`.
-    pub const BONE_MOTION: u32 = 41;
-    /// Code that changes a value (`comp::step`): on a chain, or used by modifiers.
-    pub const STEP: u32 = 42;
-    /// A place in the order steps run in (`comp::phase`).
-    pub const PHASE: u32 = 43;
-    /// A mod's own data, nothing the engine reads: its tags and components say what it is
-    /// (`structgen:structure`), other mods add, edit and remove records like anything else and
-    /// read them once the game is loaded (`Host::entries_with`).
-    pub const RECORD: u32 = 44;
-    /// How many kinds there are; each has a component table (`ComponentTable`), empty for word
-    /// sets and component declarations.
-    pub const COUNT: usize = NAMES.len();
-    /// Each kind's name for messages, by value.
-    pub const NAMES: [&str; 45] = [
-        "block",
-        "item",
-        "entity",
-        "biome",
-        "dimension",
-        "menu",
-        "particle",
-        "config",
-        "sound",
-        "damage cause",
-        "entity effect",
-        "text place",
-        "game mode",
-        "pose",
-        "weather",
-        "precipitation",
-        "condition",
-        "music",
-        "camera mode",
-        "equipment slot",
-        "creative tab",
-        "sound category",
-        "entity category",
-        "tint kind",
-        "recipe kind",
-        "attribute",
-        "key",
-        "sky object",
-        "HUD element",
-        "screen part",
-        "word set",
-        "component",
-        "recipe",
-        "loot table",
-        "feature",
-        "liquid",
-        "liquid reaction",
-        "template",
-        "palette",
-        "spawn rule",
-        "terrain",
-        "bone motion",
-        "step",
-        "phase",
-        "record",
-    ];
-}
-
-/// Frozen components of one entry kind, readable directly by mods: whether entry `e` has
-/// component `c` is bit `c % 64` of `bits[e * words + c / 64]`; its value (if the component has
-/// one on this kind) is at `columns[c].data + e * columns[c].stride`.
+/// One entry contributed to a dynamically declared registry.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct KindTable {
+pub struct RegistryEntryDesc {
+    pub name: Str,
+    pub cell: *const AtomicU32,
+    pub mode: u32,
+    pub ops: Slice<ValueOp>,
+}
+
+/// Frozen components of one registry, readable directly by mods: whether entry `e` has
+/// component `c` is bit `c % 64` of `bits[e * words + c / 64]`; its value (if the component has
+/// one on this entry) is at `columns[c].data + e * columns[c].stride`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RegistryTable {
     pub entries: u32,
     pub words: u32,
     pub bits: *const u64,
-    /// One per component id; `stride` 0 when no entry of this kind has a value for it.
+    /// One per component id; `stride` 0 when no entry of this registry has a value for it.
     pub columns: *const Column,
 }
 
@@ -531,7 +458,8 @@ pub struct Column {
 pub struct ComponentTable {
     /// Number of component ids.
     pub components: u32,
-    pub kinds: [KindTable; entry_kind::COUNT],
+    /// Component tables indexed by the corresponding meta-registry RegistryId.
+    pub registries: Slice<RegistryTable>,
 }
 
 unsafe impl Sync for ComponentTable {}
@@ -891,7 +819,7 @@ pub mod comp {
         pub const SHRINK: &str = "particle.shrink";
     }
 
-    /// A thing in a dimension's sky (`entry_kind::SKY`): `KIND` (`u32`, `sky_kind`, `BODY`),
+    /// A thing in a dimension's sky (`core:sky_object`): `KIND` (`u32`, `sky_kind`, `BODY`),
     /// `TEXTURE` (`str`, under `textures/sky/`; a dome tells its layout by its shape), `SHADER`
     /// (`str`, `shaders/sky/<name>.wgsl` instead of the plain picture), `PHASE` (`f32`, turns on
     /// its orbit at time 0: 0 rising in the east, 0.25 overhead), `ORBIT` (`f32`, ticks per turn,
@@ -952,7 +880,7 @@ pub mod comp {
     /// A word set's `WORDS` (`[str]`): command parameters `word(#set)` complete from them.
     pub const WORDS: &str = "words.words";
 
-    /// A component's declaration (`entry_kind::COMPONENT`, named like it): `SCHEMA` (`str`) of its
+    /// A component's declaration (`core:component`, named like it): `SCHEMA` (`str`) of its
     /// value; `DEFAULT` (`[u8]`): entities carry it, starting with these bytes (its size), with a
     /// tag per `component_flags` (`FLAGS`); `SLOTS` (`u32`): a storage, an inventory of so many
     /// slots entities and stacks carry, saved and kept on respawn; tag `STACK`: stacks carry it,
@@ -978,7 +906,7 @@ pub mod comp {
         ];
     }
 
-    /// A recipe's (`entry_kind::RECIPE`): `KIND` (`str`, a recipe kind), `PATTERN` (`[str]`, rows
+    /// A recipe's (`core:recipe`): `KIND` (`str`, a recipe kind), `PATTERN` (`[str]`, rows
     /// of key characters of a shaped one) with `KEYS` (`[RecipeKey]`), `INPUTS` (`[str]`, of a
     /// shapeless or processing one: item names or `#tags`, a liquid by its name) with `AMOUNTS`
     /// (`[u32]`, of each, millibuckets for liquids, 1), `OUTPUT` (`str`) and `COUNT` (`u32`, 1),
@@ -1000,7 +928,7 @@ pub mod comp {
         pub const HIDDEN: &str = "recipe.hidden";
     }
 
-    /// A loot table's (`entry_kind::LOOT`): `POOLS` (`[LootPool]`), then `SWAPS` (`[LootSwap]`)
+    /// A loot table's (`core:loot_table`): `POOLS` (`[LootPool]`), then `SWAPS` (`[LootSwap]`)
     /// in order. Without a table a block drops its own item when harvested.
     pub mod loot {
         pub const POOLS: &str = "loot.pools";
@@ -1018,7 +946,7 @@ pub mod comp {
         pub const Y: &str = "y";
     }
 
-    /// A feature (`entry_kind::FEATURE`): where (`common`), how its starts spread, its shape, and
+    /// A feature (`core:feature`): where (`common`), how its starts spread, its shape, and
     /// how it writes its blocks. Everything generation puts into the world after the terrain is
     /// one: ores, geodes, trees, boulders, structures, villages, grass.
     ///
@@ -1088,7 +1016,7 @@ pub mod comp {
         pub const CLEAR_ABOVE: &str = "feature.clear_above";
     }
 
-    /// A liquid's flow (`entry_kind::LIQUID`; its block has 16 states: 0 the source, 1..7 flowing
+    /// A liquid's flow (`core:liquid`; its block has 16 states: 0 the source, 1..7 flowing
     /// with less and less, 8 falling): `DELAY` (`u32`, ticks between flow steps, 5), `DROP_OFF`
     /// (`u32`, level lost per block of spread, 1: 7 blocks), `SLOPE_FIND` (`u32`, how far flowing
     /// liquid looks for a way down, 4), `RENEWABLE` (`u32`, a spot over solid ground or a source
@@ -1104,7 +1032,7 @@ pub mod comp {
         pub const HEAT: &str = "liquid.heat";
     }
 
-    /// What happens where two liquids meet (`entry_kind::REACTION`): when `LIQUID` (`match`) has
+    /// What happens where two liquids meet (`core:reaction`): when `LIQUID` (`match`) has
     /// `TOUCHING` (`match`) beside or above it, it turns into
     /// `SOURCE` (`str`, a block) if it was a source, else `FLOWING` (`str`); when it comes down
     /// onto `TOUCHING`, that block becomes `FALLS_INTO` (`str`). What is not set stays as it is.
@@ -1117,7 +1045,7 @@ pub mod comp {
         pub const FALLS_INTO: &str = "reaction.falls_into";
     }
 
-    /// A template (`entry_kind::TEMPLATE`): a fixed shape of blocks for features, moving bodies,
+    /// A template (`core:template`): a fixed shape of blocks for features, moving bodies,
     /// `Host::place` and `/structure`, checked when the game loads. `BLOCKS` (`[TemplateBlock]`)
     /// from its lowest corner, cells it doesn't name left as they are; `SLOTS`
     /// (`[PaletteSlot]`, the blocks its `@slot`s take unless a palette says); `ENTITIES`
@@ -1134,13 +1062,13 @@ pub mod comp {
         pub const JOINTS: &str = "template.joints";
     }
 
-    /// A palette (`entry_kind::PALETTE`): `SLOTS` (`[PaletteSlot]`), the block each slot of a
+    /// A palette (`core:palette`): `SLOTS` (`[PaletteSlot]`), the block each slot of a
     /// template takes. A slot `@wall:stairs` takes the stairs `shapes_of` made of `wall`'s block.
     pub mod palette {
         pub const SLOTS: &str = "palette.slots";
     }
 
-    /// A natural spawning rule's (`entry_kind::SPAWN`). Every two seconds the engine tries a few
+    /// A natural spawning rule's (`core:spawn_rule`). Every two seconds the engine tries a few
     /// spots 20 to 45 blocks from each player; a spot takes one of the rules that hold there, by
     /// `WEIGHT` (`u32`, 1), while that entity category is under its cap near the player (8
     /// hostile, 6 passive, 6 other within 64 blocks). `ENTITY` (`str`) spawns `GROUP` (`[u32;2]`,
@@ -1157,7 +1085,7 @@ pub mod comp {
         pub const WHEN: &str = "spawn.when";
     }
 
-    /// A dimension's terrain (`entry_kind::TERRAIN`): `STONE` (`str`, the block it is made of),
+    /// A dimension's terrain (`core:terrain`): `STONE` (`str`, the block it is made of),
     /// `BASE_HEIGHT` (`f64`, the ground before features, 64), `SEA` (`TerrainSea`, none), `CAVES`
     /// (`TerrainCaves`, none), `FIELDS` (`[TerrainField]`, after the engine's `temperature`,
     /// `humidity` and `continent`; one named again takes the earlier one's place), `LANDFORMS`
@@ -1178,7 +1106,7 @@ pub mod comp {
         pub const CAVE_BIOMES: &str = "terrain.cave_biomes";
     }
 
-    /// An item's own (`entry_kind::ITEM`), besides the shared ones (`max_stack`, `durability`,
+    /// An item's own (`core:item`), besides the shared ones (`max_stack`, `durability`,
     /// tools, food ...) that go in its component table: `comp::LAYERS` (`str`, how it looks,
     /// as a stack's: one layer, `<ns>:item/<name>`, when not given; empty with `BLOCK`: the
     /// block's model), `BLOCK` (`str`, the block it
@@ -1197,7 +1125,7 @@ pub mod comp {
         pub const CONDITION: &str = "item.condition";
     }
 
-    /// A block's (`entry_kind::BLOCK`). Its states are every combination of `PROPS`
+    /// A block's (`core:block`). Its states are every combination of `PROPS`
     /// (`[BlockProp]`, the first value the default, the last property changing fastest; none: one
     /// state). Each state gets the block's ops, then those of each part (`EntryDesc::parts`) whose
     /// key fits it, in order; an edit's ops come after the parts before it, so they win on every
@@ -1288,7 +1216,7 @@ pub mod comp {
         pub const HAZARDS: &str = "block.hazards";
     }
 
-    /// A biome's own climate and surface (`entry_kind::BIOME`), what every terrain rule placing
+    /// A biome's own climate and surface (`core:biome`), what every terrain rule placing
     /// it starts from (`BiomeRule` says what each is): `RANGES` (`[RuleRange]`, a field named again
     /// replaces the earlier range; none: everywhere), `HEIGHT` (`[i32;2]`, any), `TOP`, `FILLER`
     /// (`str`, none: stone), `DEPTH` (`i32`, 3), `UNDER` (`str`), `UNDER_LAYERS` (`i32`, 0),
@@ -1310,7 +1238,7 @@ pub mod comp {
         pub const TINTS: &str = "biome.tints";
     }
 
-    /// A dimension's (`entry_kind::DIMENSION`): `GENERATOR` (`callback`, `GenArgs`, called in
+    /// A dimension's (`core:dimension`): `GENERATOR` (`callback`, `GenArgs`, called in
     /// parallel, a pure function of its args), `SPAWN` (`callback`, `SpawnArgs`; none: open ground
     /// near 0, 0 on its columns, biomes tagged `spawn_biome` first), `COLUMN` (`callback`,
     /// `ColumnArgs`, pure: surface and biome of a column of a dimension without a terrain, which
@@ -1345,7 +1273,7 @@ pub mod comp {
         pub const BARE: &str = "dimension.bare";
     }
 
-    /// A menu's (`entry_kind::MENU`, screens included): `GROUPS` (`[SlotGroupDef]`, its slots in
+    /// A menu's (`core:menu`, screens included): `GROUPS` (`[SlotGroupDef]`, its slots in
     /// this order), `RECIPES` (`[str]`, recipe kinds its `arrow` bars open in the recipe viewer),
     /// callbacks `ON_CHANGE` (`MenuArgs`, server: a slot changed), `ON_TAKE` (`MenuArgs` with
     /// `slot`, server: an output slot was taken), `ON_TICK` (`MenuArgs`, server, every tick while
@@ -1373,7 +1301,7 @@ pub mod comp {
         pub const SHOWS_CHAT: &str = "menu.shows_chat";
     }
 
-    /// An entity kind's (`entry_kind::ENTITY`, the engine's `core:player`, `core:item`,
+    /// An entity kind's (`core:entity`, the engine's `core:player`, `core:item`,
     /// `core:falling_block`, `core:moving_blocks` and `core:platform` too). Its body: `SIZE`
     /// (`BodySize`, 0.6 by 1.8), `EYE` (`f32` blocks, `EYE_SHARE` of its height), `SPEED` (`f32`,
     /// walking, blocks per second, 3), `CARRY_HEIGHT` (`f32`, a solid body's riders up to this high
@@ -1382,7 +1310,7 @@ pub mod comp {
     /// its size). Its look: `TEXTURE` (`str`, `<ns>:entity/<name>`), `TEXTURE_SIZE` (`[u32;2]`,
     /// width and height of the skin `PARTS` are laid out on, 64 by 32), `PARTS` (`[ModelPart]`, its
     /// model in code; a model file, `comp::MODEL`, wins), `BONE_MODELS` (`[BoneModel]`). `CATEGORY`
-    /// (`str`, an `entry_kind::ENTITY_CATEGORY`, `core:misc`), `TEMPLATE` (`str`, a moving body built
+    /// (`str`, an `core:entity_CATEGORY`, `core:misc`), `TEMPLATE` (`str`, a moving body built
     /// of that template, block (0, 0, 0) centered on it), `BLOCK` (`str`, the block it is the block
     /// entity of: made with its inventory where one is placed, gone with its items when it breaks),
     /// `SEATS` (`[Seat]`, where riders sit, numbered in this order), `ATTACH` (`[Attach]`, components
@@ -1457,7 +1385,7 @@ pub mod comp {
         pub const HITBOXES: &str = "entity.hitboxes";
     }
 
-    /// A step's (`entry_kind::STEP`): `CHAIN` (`str`, the value it changes every time it is
+    /// A step's (`core:step`): `CHAIN` (`str`, the value it changes every time it is
     /// computed; none: it only runs where a modifier names it), `PHASE` (`str`, `phase::*` or a
     /// mod's), `AFTER` and `BEFORE` (`[str]`, steps of the same phase it runs after or before),
     /// `CALL` (`callback`, `StepArgs`; the engine's own steps have none until a mod sets one).
@@ -1469,12 +1397,12 @@ pub mod comp {
         pub const CALL: &str = "step.call";
     }
 
-    /// A phase's (`entry_kind::PHASE`): `AFTER` (`str`), the phase it comes right after.
+    /// A phase's (`core:phase`): `AFTER` (`str`), the phase it comes right after.
     pub mod phase {
         pub const AFTER: &str = "phase.after";
     }
 
-    /// A bone motion's (`entry_kind::BONE_MOTION`): `GRAVITY`, the pull toward hanging straight
+    /// A bone motion's (`core:bone_motion`): `GRAVITY`, the pull toward hanging straight
     /// down, `SPRING`, the pull back to where the clips have it, `DRAG`, how fast a swing dies down
     /// (`f32` each, 0). `MAX_ANGLE` is the cone half-angle in degrees.
     pub mod bone_motion {
@@ -1488,7 +1416,7 @@ pub mod comp {
         }
     }
 
-    /// A weather's (`entry_kind::WEATHER`). How it looks, each `f32` 0..1 (rain's unless set):
+    /// A weather's (`core:weather`). How it looks, each `f32` 0..1 (rain's unless set):
     /// `FALLS` how much of the precipitation falls, `SKY_GRAY`, `SKY_COVER` (sun, moon, stars),
     /// `FOG_GRAY`, `CLOUD_GRAY`, `CLOUD_DARK` (thunder 0.95), `DARKNESS` the share of daylight
     /// taken. `SOUND` (`str`) a sound event now and then under the open sky while it falls,
@@ -1595,7 +1523,7 @@ pub mod comp {
     /// How an item and its stacks look, and each face of a block (`block::TEXTURES`): pictures
     /// one over the other, the first at the bottom (a tool made of parts: handle, head, binding;
     /// a grass block's side: dirt and the green over it; a plain one is one). Text: texture
-    /// names, space separated, each tinted as `Layer` says. On the item (`entry_kind::ITEM`) it is
+    /// names, space separated, each tinted as `Layer` says. On the item (`core:item`) it is
     /// every stack's; a stack's own replaces it.
     pub const LAYERS: &str = "layers";
     /// Item shown on the wearer's model: `Worn`, plus `worn_texture: str` in the wearer's skin layout.
@@ -2924,7 +2852,7 @@ impl Schema for ShipCollision {
     const SCHEMA: &'static str = "{ship:u64,other:u64,point:[f64;3],normal:[f64;3],speed:f64,impulse:f64}";
 }
 
-/// What a camera mode (`entry_kind::CAMERA`, `comp::camera`) is and does: each frame on the
+/// What a camera mode (`core:camera_mode`, `comp::camera`) is and does: each frame on the
 /// client its `call` (`CameraArgs`) says where the camera is, and these what goes with it. The
 /// engine's are `core:first_person`, `core:behind`, `core:front` (F5 goes through those with
 /// `CYCLE`) and `core:free` (`core:freecam`, P).
@@ -3265,7 +3193,7 @@ pub struct SpawnEntityDesc {
 pub mod spawn_cause {
     /// A mod's `World::spawn`.
     pub const MOD: u32 = 0;
-    /// Natural spawning (`entry_kind::SPAWN` rules).
+    /// Natural spawning (`core:spawn_rule` rules).
     pub const NATURAL: u32 = 1;
     /// `/summon`.
     pub const COMMAND: u32 = 2;
@@ -3340,7 +3268,7 @@ impl Schema for EffectChange {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct KeyChange {
     pub player: u64,
-    /// The key's id (`entry_kind::KEY`).
+    /// The key's id (`core:key`).
     pub key: u32,
     pub down: u32,
     pub held_ticks: u32,
@@ -3495,7 +3423,7 @@ pub struct WeatherLook {
     pub darkness: f32,
 }
 
-/// The engine's poses (`entry_kind::POSE`), registered first in this order; `EntityState::pose`
+/// The engine's poses (`core:pose`), registered first in this order; `EntityState::pose`
 /// holds one of them or a mod's.
 pub mod pose {
     pub const STAND: u32 = 0;
@@ -3727,7 +3655,7 @@ pub struct RecipeInfo {
     pub time: u32,
     pub inputs: u32,
     pub outputs: u32,
-    /// Its entry (`entry_kind::RECIPE`), whose component table row holds what else it carries.
+    /// Its entry (`core:recipe`), whose component table row holds what else it carries.
     pub entry: u32,
 }
 
@@ -3876,7 +3804,7 @@ pub mod ui_kind {
     /// In a recipe's `display`: its inputs (`data` 0) or outputs (1) as the kind's grid, or only
     /// number `slot` when it is not `u32::MAX`.
     pub const RECIPE_SLOT: u32 = 10;
-    /// What mods add to place `text` of screen `class` (`entry_kind::SCREEN_PART`).
+    /// What mods add to place `text` of screen `class` (`core:screen_part`).
     pub const SCREEN_PARTS: u32 = 11;
     /// The player's equipment slots of the open menu (`slot_owner::EQUIPMENT`), a column.
     pub const EQUIPMENT: u32 = 13;
@@ -4155,8 +4083,30 @@ pub struct Host {
     pub reg_command: unsafe extern "C" fn(reg: *mut Registrar, name: Str, usage: Str, client: u32, cb: Callback),
 
     /// Looks up a frozen id by full name ("base:stone"), `u32::MAX` if missing. Blocks give their
-    /// first state and write the state count to `count` (others write 1). `kind` is `entry_kind`.
-    pub find: unsafe extern "C" fn(kind: u32, name: Str, count: *mut u32) -> u32,
+    /// first state and write the state count to `count` (others write 1). The registry must be a
+    /// core registry with a specialized runtime ID space.
+    pub find: unsafe extern "C" fn(registry: RegistryId, name: Str, count: *mut u32) -> u32,
+    /// Looks up a registry by its namespaced identifier, `u32::MAX` if missing.
+    pub find_registry: unsafe extern "C" fn(name: Str) -> u32,
+    /// Declare a new registry owned by the mod in the active preinit callback.
+    pub meta_registry_declare: unsafe extern "C" fn(reg: *mut MetaRegistrar, name: Str),
+    /// Order the registry just declared by this mod before another registry.
+    pub meta_registry_before: unsafe extern "C" fn(reg: *mut MetaRegistrar, registry: Str, other: Str),
+    /// Order the registry just declared by this mod after another registry.
+    pub meta_registry_after: unsafe extern "C" fn(reg: *mut MetaRegistrar, registry: Str, other: Str),
+    /// Declare that this mod contributes entries to a registry owned by another mod.
+    pub meta_registry_contribute: unsafe extern "C" fn(reg: *mut MetaRegistrar, registry: Str),
+    /// Gets a registry's namespaced identifier, an empty string if the id is invalid.
+    pub registry_name: unsafe extern "C" fn(id: RegistryId) -> Str,
+    /// Looks up an entry name within a registry, `u32::MAX` if missing.
+    pub find_registry_entry: unsafe extern "C" fn(registry: RegistryId, name: Str) -> u32,
+    /// Gets an entry's name within a registry, empty if either id is invalid.
+    pub registry_entry_name: unsafe extern "C" fn(registry: RegistryId, entry: u32) -> Str,
+    /// Number of entries in a frozen generic registry, or u32::MAX if it has no frozen generic table.
+    pub registry_entry_count: unsafe extern "C" fn(registry: RegistryId) -> u32,
+    /// Reads a component's schema and bytes from a frozen generic registry entry.
+    pub registry_entry_component:
+        unsafe extern "C" fn(registry: RegistryId, entry: u32, component: Str, schema: *mut Str, len: *mut usize) -> *const u8,
     /// State id -> first state id of its block.
     pub block_of: unsafe extern "C" fn(state: u32) -> u32,
     /// The value of property `name` in `state` (empty if the block has no such property).
@@ -4497,7 +4447,7 @@ pub struct Host {
     pub image_unload: unsafe extern "C" fn(id: u64),
     /// Full name of a frozen id (`find` backwards); a block state gives `ns:block` or
     /// `ns:block#i` for its `i`-th state. Empty if unknown. Valid for the whole session.
-    pub name_of: unsafe extern "C" fn(kind: u32, id: u32) -> Str,
+    pub name_of: unsafe extern "C" fn(registry: RegistryId, id: u32) -> Str,
 
     // ------------------------------------------------ liquids
     /// Liquid id of a block state, `u32::MAX` for none.
@@ -4533,6 +4483,8 @@ pub struct Host {
     pub attribute_add_modifier:
         unsafe extern "C" fn(world: *mut WorldCtx, entity: u64, name: Str, id: Str, step: Str, phase: Str, amount: f64, ticks: u64),
     pub attribute_remove_modifier: unsafe extern "C" fn(world: *mut WorldCtx, entity: u64, name: Str, id: Str),
+    /// An entry in a dynamically declared registry.
+    pub reg_registry_entry: unsafe extern "C" fn(reg: *mut Registrar, registry: RegistryId, entry: *const RegistryEntryDesc),
     /// An entry: a new one, an edit, a replacement or a removal (`EntryDesc::mode`).
     pub reg_entry: unsafe extern "C" fn(reg: *mut Registrar, entry: *const EntryDesc),
     /// Whether mod `id` is loaded, known from before any mod registers.
@@ -4600,7 +4552,7 @@ pub struct Host {
     pub action_play: unsafe extern "C" fn(world: *mut WorldCtx, id: u64, name: Str, looping: u32),
     /// Entity `id` plays action `to` wherever it would play `from`; `to` empty ends that.
     pub action_override: unsafe extern "C" fn(world: *mut WorldCtx, id: u64, from: Str, to: Str),
-    /// Server: sound event `sound` (`find` with `entry_kind::SOUND`) at `pos` for `who` (`Around`:
+    /// Server: sound event `sound` (`find` with `core:sound`) at `pos` for `who` (`Around`:
     /// the players in its range); `pos` null = not positioned (a UI sound); `pitch` 0 picks one
     /// from the event's range.
     pub play_sound: unsafe extern "C" fn(world: *mut WorldCtx, who: Who, sound: u32, pos: *const Vec3, volume: f32, pitch: f32),
@@ -4799,7 +4751,7 @@ pub struct Rect {
 }
 
 /// Tint kinds of block faces: color from the biome. The engine has `core:grass`,
-/// `core:foliage` and `core:water`; mods add their own (`entry_kind::TINT_KIND`) and name them
+/// `core:foliage` and `core:water`; mods add their own (`core:tint_kind`) and name them
 /// in `comp::TINT`.
 pub mod tint {
     /// Kinds that fit the face and quad records, the engine's three included.
@@ -4844,7 +4796,7 @@ pub struct ConditionArgs {
     pub result: u32,
 }
 
-/// The engine's conditions, the first entries of `entry_kind::CONDITION` in this order. A
+/// The engine's conditions, the first entries of `core:condition` in this order. A
 /// condition is written `name` or `name(argument)`, put together with `&`, `|`, `!` and
 /// parentheses: `night & light(..7)`; the engine's go without their namespace. Where a
 /// component takes conditions (`[str]`) all of them have to hold.
@@ -5023,7 +4975,7 @@ pub mod sky_kind {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ParticleBurst {
-    /// Particle id (`find` with `entry_kind::PARTICLE`).
+    /// Particle id (`find` with `core:particle`).
     pub kind: u32,
     pub pos: Vec3,
     /// Each particle starts up to this far from `pos` on each axis.
@@ -5121,7 +5073,7 @@ pub mod event {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FeaturePlaced {
-    /// The feature's id (`Host::find` with `entry_kind::FEATURE`).
+    /// The feature's id (`Host::find` with `core:feature`).
     pub feature: u32,
     pub dim: u32,
     /// Its start.

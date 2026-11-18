@@ -1085,7 +1085,7 @@ impl Registry {
 
     /// A loot table: a block's or entity kind's is what it drops, a `LootTable` is one of its own.
     pub fn loot<'a>(&'a mut self, table: &dyn LootSource) -> LootBuilder<'a> {
-        LootBuilder { reg: self, e: crate::entry::Entry::new(abi::entry_kind::LOOT, table.table_name().to_string()) }
+        LootBuilder { reg: self, e: crate::entry::Entry::new("core:loot_table", table.table_name().to_string()) }
     }
 
     fn loot_entry(&mut self, table: &'static LootTable) -> LootBuilder<'_> {

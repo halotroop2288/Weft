@@ -4,8 +4,8 @@
 //! makes (or finds) another handle. Handles are per process; saves and the network carry the
 //! components by name.
 
+use crate::entries::kind as ek;
 use std::sync::{Arc, OnceLock};
-use weft_abi::entry_kind as ek;
 
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;

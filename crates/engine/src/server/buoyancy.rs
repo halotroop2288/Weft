@@ -1,6 +1,7 @@
+use crate::entries::kind as ek;
 use glam::{BVec3, DQuat, DVec3, IVec2, IVec3};
 use rustc_hash::{FxHashMap, FxHashSet};
-use weft_abi::{self as abi, entry_kind as ek};
+use weft_abi as abi;
 
 use super::dim::Dim;
 use super::entity::{BodyMotion, Completion, Entities, Motion};

@@ -1,17 +1,34 @@
 //! Engine side of the mod ABI: the function table mods call, and the wrapper the engine uses to
 //! call mod callbacks (profiling and fault isolation live there).
 
+use std::collections::BTreeSet;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 
+use crate::entries::kind as ek;
 use glam::{DVec3, IVec3};
-use weft_abi::{self as abi, Callback, Host, ItemStack, ModId, Str, entry_kind as ek};
+use weft_abi::{self as abi, Callback, Host, ItemStack, ModId, Str};
 
 use crate::content::{RawRegistrar, content, try_content};
 use crate::registry;
 use crate::server::Dim;
 use crate::server::menu::MenuCall;
+
+/// Temporary engine-owned state passed to a mod's preinit callback.
+pub(crate) struct RawMetaRegistrar {
+    owner: ModId,
+    meta: *mut crate::meta_registry::MetaRegistry,
+    declared: BTreeSet<String>,
+    pub contributions: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+impl RawMetaRegistrar {
+    pub(crate) fn new(meta: &mut crate::meta_registry::MetaRegistry, owner: ModId) -> Self {
+        Self { owner, meta, declared: BTreeSet::new(), contributions: Vec::new(), errors: Vec::new() }
+    }
+}
 
 pub static HOST: Host = Host {
     log: host_log,
@@ -21,6 +38,16 @@ pub static HOST: Host = Host {
     timer,
     reg_command,
     find,
+    find_registry,
+    meta_registry_declare,
+    meta_registry_before,
+    meta_registry_after,
+    meta_registry_contribute,
+    registry_name,
+    find_registry_entry,
+    registry_entry_name,
+    registry_entry_count,
+    registry_entry_component,
     block_of,
     state_prop,
     state_with,
@@ -177,6 +204,7 @@ pub static HOST: Host = Host {
     attribute,
     attribute_add_modifier,
     attribute_remove_modifier,
+    reg_registry_entry,
     reg_entry,
     mod_loaded,
     roll_loot,
@@ -1370,6 +1398,137 @@ pub fn channel_for(name: &str, schema: &str) -> Option<u32> {
     Some(channel)
 }
 
+unsafe extern "C" fn find_registry(name: Str) -> u32 {
+    let name = unsafe { name.as_str() };
+    crate::modloader::meta_registry()
+        .and_then(|meta| meta.find(name))
+        .map_or(u32::MAX, |id| id.0)
+}
+
+unsafe extern "C" fn meta_registry_declare(reg: *mut abi::MetaRegistrar, name: Str) {
+    let Some(reg) = (unsafe { reg.cast::<RawMetaRegistrar>().as_mut() }) else { return };
+    let name = unsafe { name.as_str() }.to_string();
+    match unsafe { &mut *reg.meta }.registry(name.clone(), reg.owner) {
+        Ok(_) => {
+            reg.declared.insert(name);
+        }
+        Err(error) => reg.errors.push(error.to_string()),
+    }
+}
+
+unsafe extern "C" fn meta_registry_before(reg: *mut abi::MetaRegistrar, registry: Str, other: Str) {
+    let Some(reg) = (unsafe { reg.cast::<RawMetaRegistrar>().as_mut() }) else { return };
+    let (registry, other) = (unsafe { registry.as_str() }, unsafe { other.as_str() });
+    if !reg.declared.contains(registry) {
+        reg.errors
+            .push(format!("cannot order undeclared registry {registry}"));
+        return;
+    }
+    unsafe { &mut *reg.meta }.order_before(registry, other);
+}
+
+unsafe extern "C" fn meta_registry_after(reg: *mut abi::MetaRegistrar, registry: Str, other: Str) {
+    let Some(reg) = (unsafe { reg.cast::<RawMetaRegistrar>().as_mut() }) else { return };
+    let (registry, other) = (unsafe { registry.as_str() }, unsafe { other.as_str() });
+    if !reg.declared.contains(registry) {
+        reg.errors
+            .push(format!("cannot order undeclared registry {registry}"));
+        return;
+    }
+    unsafe { &mut *reg.meta }.order_after(registry, other);
+}
+
+unsafe extern "C" fn meta_registry_contribute(reg: *mut abi::MetaRegistrar, registry: Str) {
+    let Some(reg) = (unsafe { reg.cast::<RawMetaRegistrar>().as_mut() }) else { return };
+    reg.contributions
+        .push(unsafe { registry.as_str() }.to_string());
+}
+
+unsafe extern "C" fn registry_name(id: abi::RegistryId) -> Str {
+    crate::modloader::meta_registry()
+        .and_then(|meta| meta.registry(id))
+        .map_or(Str::EMPTY, |registry| Str::new(&registry.name))
+}
+
+unsafe extern "C" fn find_registry_entry(registry: abi::RegistryId, name: Str) -> u32 {
+    let name = unsafe { name.as_str() };
+    if let Some(entries) = crate::content::registry_contents(registry) {
+        return entries.ids.get(name).copied().unwrap_or(u32::MAX);
+    }
+    crate::content::try_content()
+        .and_then(|content| content.registry_entries.get(&registry))
+        .and_then(|entries| entries.ids.get(name))
+        .copied()
+        .unwrap_or(u32::MAX)
+}
+
+unsafe extern "C" fn registry_entry_name(registry: abi::RegistryId, entry: u32) -> Str {
+    if let Some(entries) = crate::content::registry_contents(registry) {
+        return entries
+            .entries
+            .get(entry as usize)
+            .map_or(Str::EMPTY, |entry| Str::new(&entry.name));
+    }
+    crate::content::try_content()
+        .and_then(|content| content.registry_entries.get(&registry))
+        .and_then(|entries| entries.entries.get(entry as usize))
+        .map_or(Str::EMPTY, |entry| Str::new(&entry.name))
+}
+
+unsafe extern "C" fn registry_entry_count(registry: abi::RegistryId) -> u32 {
+    if let Some(entries) = crate::content::registry_contents(registry) {
+        return entries.entries.len() as u32;
+    }
+    crate::content::try_content()
+        .and_then(|content| content.registry_entries.get(&registry))
+        .map_or(u32::MAX, |entries| entries.entries.len() as u32)
+}
+
+unsafe extern "C" fn registry_entry_component(
+    registry: abi::RegistryId,
+    entry: u32,
+    component: Str,
+    schema: *mut Str,
+    len: *mut usize,
+) -> *const u8 {
+    let component = unsafe { component.as_str() };
+    if let Some(entries) = crate::content::registry_contents(registry) {
+        let Some(value) = entries
+            .entries
+            .get(entry as usize)
+            .and_then(|entry| entry.value(component))
+        else {
+            return std::ptr::null();
+        };
+        unsafe {
+            if !schema.is_null() {
+                *schema = Str::new(&value.schema);
+            }
+            if !len.is_null() {
+                *len = value.bytes.len();
+            }
+        }
+        return value.bytes.as_ptr();
+    }
+
+    let Some(value) = crate::content::try_content()
+        .and_then(|content| content.registry_entries.get(&registry))
+        .and_then(|entries| entries.entries.get(entry as usize))
+        .and_then(|entry| entry.value(component))
+    else {
+        return std::ptr::null();
+    };
+    unsafe {
+        if !schema.is_null() {
+            *schema = Str::new(&value.schema);
+        }
+        if !len.is_null() {
+            *len = value.bytes.len();
+        }
+    }
+    value.bytes.as_ptr()
+}
+
 unsafe extern "C" fn find_component(name: Str, schema: Str) -> u32 {
     let (name, schema) = unsafe { (name.as_str(), schema.as_str()) };
     let Some(c) = try_content() else { return u32::MAX };
@@ -1785,13 +1944,19 @@ unsafe extern "C" fn item_block(item: u32) -> u32 {
         .unwrap_or(0)
 }
 
-unsafe extern "C" fn find(kind: u32, name: Str, count: *mut u32) -> u32 {
+unsafe extern "C" fn find(registry: abi::RegistryId, name: Str, count: *mut u32) -> u32 {
     let name = unsafe { name.as_str() };
+    let Some(kind) = crate::modloader::meta_registry()
+        .and_then(|meta| meta.registry(registry))
+        .and_then(|entry| entry.runtime_kind)
+    else {
+        return u32::MAX;
+    };
     let Some(c) = try_content() else { return u32::MAX };
     let mut n = 1;
     let id = match kind {
-        abi::entry_kind::BLOCK if name.contains('[') => c.state_by_name(name),
-        abi::entry_kind::BLOCK => c.game.catalog.find(ek::BLOCK, name).map(|b| {
+        ek::BLOCK if name.contains('[') => c.state_by_name(name),
+        ek::BLOCK => c.game.catalog.find(ek::BLOCK, name).map(|b| {
             n = c.blocks[b as usize].states;
             c.blocks[b as usize].first_state
         }),
@@ -1804,20 +1969,27 @@ unsafe extern "C" fn find(kind: u32, name: Str, count: *mut u32) -> u32 {
     id.unwrap_or(u32::MAX)
 }
 
-unsafe extern "C" fn name_of(kind: u32, id: u32) -> Str {
+unsafe extern "C" fn name_of(registry: abi::RegistryId, id: u32) -> Str {
     static STATE_NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     let Some(c) = try_content() else { return Str::EMPTY };
-    let name: Option<&str> = match kind {
-        abi::entry_kind::BLOCK => {
+    let Some(descriptor) = crate::modloader::meta_registry().and_then(|meta| meta.registry(registry)) else {
+        return Str::EMPTY;
+    };
+    let name = match descriptor.runtime_kind {
+        Some(ek::BLOCK) => {
             let names = STATE_NAMES.get_or_init(|| {
                 (0..c.states.len() as u32)
-                    .map(|s| c.state_name(s))
+                    .map(|state| c.state_name(state))
                     .collect()
             });
-            names.get(id as usize).map(|s| s.as_str())
+            names.get(id as usize).map(String::as_str)
         }
-        ek::COMPONENT => c.components.names.get(id as usize).map(String::as_str),
-        _ => c.game.catalog.name(kind, id),
+        Some(kind) => c.game.catalog.name(kind, id),
+        None => c
+            .registry_entries
+            .get(&registry)
+            .and_then(|contents| contents.entries.get(id as usize))
+            .map(|entry| entry.name.as_str()),
     };
     name.map_or(Str::EMPTY, Str::new)
 }
@@ -2126,10 +2298,55 @@ unsafe extern "C" fn attribute_remove_modifier(w: *mut abi::WorldCtx, entity: u6
     }
 }
 
+unsafe extern "C" fn reg_registry_entry(r: *mut abi::Registrar, registry: abi::RegistryId, d: *const abi::RegistryEntryDesc) {
+    unsafe {
+        let r = reg(r);
+        let descriptor = crate::modloader::meta_registry().and_then(|meta| meta.registry(registry));
+        if r.active_registry != Some(registry) {
+            let requested = descriptor.map_or_else(|| format!("#{}", registry.0), |entry| entry.name.clone());
+            let active = r
+                .active_registry
+                .and_then(|id| crate::modloader::meta_registry().and_then(|meta| meta.registry(id)))
+                .map_or_else(|| "no registry".to_string(), |entry| entry.name.clone());
+            r.errors
+                .push(format!("cannot register entries in {requested} while {active} is active"));
+            return;
+        }
+        if descriptor.is_none_or(|entry| entry.runtime_kind.is_some()) {
+            let name = descriptor.map_or_else(|| format!("#{}", registry.0), |entry| entry.name.clone());
+            r.errors
+                .push(format!("generic registry entries are not supported in specialized registry {name}"));
+            return;
+        }
+        let entry = crate::entries::RawRegistryEntry::copy(r.owner, registry, &*d);
+        r.registry_entries.push(entry);
+    }
+}
+
 unsafe extern "C" fn reg_entry(r: *mut abi::Registrar, d: *const abi::EntryDesc) {
     unsafe {
         let r = reg(r);
-        let e = crate::entries::RawEntry::copy(r.owner, &*d);
+        let registry = (*d).registry;
+        if r.active_registry.is_some_and(|active| active != registry) {
+            let requested = crate::modloader::meta_registry()
+                .and_then(|meta| meta.registry(registry))
+                .map_or_else(|| format!("#{}", registry.0), |entry| entry.name.clone());
+            let active = r
+                .active_registry
+                .and_then(|id| crate::modloader::meta_registry().and_then(|meta| meta.registry(id)))
+                .map_or_else(|| "unknown".to_string(), |entry| entry.name.clone());
+            r.errors
+                .push(format!("cannot register entries in {requested} while {active} is active"));
+            return;
+        }
+        let descriptor = crate::modloader::meta_registry().and_then(|meta| meta.registry(registry));
+        if !descriptor.is_some_and(|entry| entry.runtime_kind.is_some()) {
+            let name = descriptor.map_or_else(|| format!("#{}", registry.0), |entry| entry.name.clone());
+            r.errors
+                .push(format!("cannot register specialized entry in unknown or unsupported registry {name}"));
+            return;
+        }
+        let e = crate::entries::RawEntry::copy(r.owner, registry, &*d);
         r.game.entries.push(e);
     }
 }
@@ -2393,4 +2610,52 @@ unsafe extern "C" fn config_text(id: u32) -> Str {
 
 unsafe extern "C" fn config_set_text(id: u32, value: Str) {
     unsafe { crate::config::set_text(id, value.as_str()) }
+}
+
+#[cfg(test)]
+mod meta_registry_tests {
+    use super::*;
+
+    #[test]
+    fn preinit_builders_declare_and_order_registries_before_resolving_contributions() {
+        let mut meta = crate::meta_registry::MetaRegistry::new();
+        meta.declare_core("core:item", 0).unwrap();
+
+        let mut provider = RawMetaRegistrar::new(&mut meta, ModId(1));
+        let provider_ptr = &mut provider as *mut _ as *mut abi::MetaRegistrar;
+        unsafe {
+            meta_registry_declare(provider_ptr, Str::new("materials:tool_material"));
+            meta_registry_before(provider_ptr, Str::new("materials:tool_material"), Str::new("core:item"));
+        }
+        assert!(provider.errors.is_empty(), "{:?}", provider.errors);
+        drop(provider);
+
+        let mut generator = RawMetaRegistrar::new(&mut meta, ModId(2));
+        let generator_ptr = &mut generator as *mut _ as *mut abi::MetaRegistrar;
+        unsafe {
+            meta_registry_contribute(generator_ptr, Str::new("core:item"));
+        }
+        let contributions = std::mem::take(&mut generator.contributions);
+        assert!(generator.errors.is_empty(), "{:?}", generator.errors);
+        drop(generator);
+
+        for registry in contributions {
+            meta.contribute(&registry, ModId(2)).unwrap();
+        }
+
+        let frozen = meta.freeze(&[], &[ModId(1), ModId(2)]).unwrap();
+        let names: Vec<&str> = frozen
+            .load_order()
+            .iter()
+            .map(|id| frozen.registry(*id).unwrap().name.as_str())
+            .collect();
+        assert_eq!(names, ["materials:tool_material", "core:item"]);
+        assert!(
+            frozen
+                .registry(frozen.find("core:item").unwrap())
+                .unwrap()
+                .contributors
+                .contains(&ModId(2))
+        );
+    }
 }

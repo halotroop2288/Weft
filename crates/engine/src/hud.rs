@@ -1,8 +1,8 @@
 //! In-game overlay: crosshair, hotbar, debug lines, chat, and HUD parts registered by mods.
 //! Rebuilt only when what it shows changes; mod parts update through their bindings.
 
+use crate::entries::kind as ek;
 use weft_abi::ItemStack;
-use weft_abi::entry_kind as ek;
 
 use crate::app::Ctx;
 use crate::client::modui::{self, TAG_ENTITY, TAG_SLOT};

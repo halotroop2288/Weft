@@ -1,9 +1,9 @@
+use crate::entries::kind as ek;
 pub mod api;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
-use weft_abi::entry_kind as ek;
 
 use glam::Vec2;
 use weft_abi as abi;

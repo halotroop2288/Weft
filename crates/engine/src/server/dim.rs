@@ -3,12 +3,13 @@ use std::cmp::Reverse;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::entries::kind as ek;
 use crate::tag_bits::damage as df;
 use crate::tag_bits::entity as ef;
 use glam::{DVec3, IVec3};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
-use weft_abi::{self as abi, ItemStack, block_flags as bf, damage_cause as damage, entry_kind as ek};
+use weft_abi::{self as abi, ItemStack, block_flags as bf, damage_cause as damage};
 
 use super::entity::{Completion, Entities, Entity, Motion, Told, step};
 use super::space::{BlockTimer, Space};

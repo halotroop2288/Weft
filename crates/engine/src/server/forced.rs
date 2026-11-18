@@ -2,9 +2,9 @@
 //! of cubes kept for so many ticks more unless renewed, as block entities only or all of it. Saved
 //! with the world, so a factory goes on after a restart.
 
+use crate::entries::kind as ek;
 use glam::IVec3;
 use rustc_hash::{FxHashMap, FxHashSet};
-use weft_abi::entry_kind as ek;
 use weft_abi::force_load as fl;
 
 use super::Server;

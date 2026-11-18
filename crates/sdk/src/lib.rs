@@ -33,8 +33,8 @@ mod view;
 mod world;
 
 pub use abi::{
-    BlockPos, Blocking, EmbeddedProjectile, EntitySize, Holder, ItemStack, OpenMenu, ProjectileCatch, Rect, UV_FROM_BOX, UV_NO_FACE, Vec3,
-    Who, hitbox_part, hitbox_part_id, hud_anchor, tool_tier,
+    BlockPos, Blocking, EmbeddedProjectile, EntitySize, Holder, ItemStack, OpenMenu, ProjectileCatch, Rect, RegistryId, UV_FROM_BOX,
+    UV_NO_FACE, Vec3, Who, hitbox_part, hitbox_part_id, hud_anchor, tool_tier,
 };
 pub use camera::{CameraFrame, Shot, cameras, easing, shot};
 pub use client::{Channel, Client, DisplaySource, Hand, Packet, Payload, keys, launch_option, screens};
@@ -127,16 +127,43 @@ macro_rules! trace { ($($t:tt)*) => { $crate::__log_macro!($crate::abi::log_leve
 /// that are there, the later one's edits winning where two change one thing:
 ///
 /// ```ignore
-/// weft_sdk::declare_mod!(deps: ["base"], after: ["othermod"], before: [], init: init);
+/// // Registry declarations and dependencies happen before any registry is populated.
+/// weft_sdk::declare_mod!(deps: ["base"], after: ["othermod"], before: [], preinit: preinit, init: init);
+///
+/// fn preinit(r: &mut weft_sdk::MetaRegistry) {
+///     r.registry("materials:tool_material").before("core:item");
+///     r.contribute_to("core:item");
+/// }
 /// ```
 #[macro_export]
 macro_rules! declare_mod {
-    (deps: [$($dep:literal),* $(,)?], $(after: [$($after:literal),* $(,)?],)? $(before: [$($before:literal),* $(,)?],)? init: $init:path $(,)?) => {
+    (
+        deps: [$($dep:literal),* $(,)?],
+        $(after: [$($after:literal),* $(,)?],)?
+        $(before: [$($before:literal),* $(,)?],)?
+        $(preinit: $preinit:path,)?
+        init: $init:path $(,)?
+    ) => {
         #[unsafe(no_mangle)]
         pub extern "C" fn weft_mod() -> *const $crate::abi::ModDecl {
             static DEPS: &[$crate::abi::Str] = &[$($crate::abi::Str::new($dep)),*];
             static AFTER: &[$crate::abi::Str] = &[$($($crate::abi::Str::new($after)),*)?];
             static BEFORE: &[$crate::abi::Str] = &[$($($crate::abi::Str::new($before)),*)?];
+            unsafe extern "C" fn __weft_preinit(
+                host: *const $crate::abi::Host,
+                me: $crate::abi::ModId,
+                reg: *mut $crate::abi::MetaRegistrar,
+            ) -> u32 {
+                unsafe {
+                    $crate::__preinit(
+                        host,
+                        me,
+                        reg,
+                        env!("CARGO_CRATE_NAME"),
+                        $crate::declare_mod!(@preinit $($preinit)?),
+                    )
+                }
+            }
             unsafe extern "C" fn __weft_init(
                 host: *const $crate::abi::Host,
                 me: $crate::abi::ModId,
@@ -151,11 +178,104 @@ macro_rules! declare_mod {
                 deps: $crate::abi::Slice::new(DEPS),
                 after: $crate::abi::Slice::new(AFTER),
                 before: $crate::abi::Slice::new(BEFORE),
+                preinit: Some(__weft_preinit),
                 init: __weft_init,
             };
             &DECL
         }
     };
+    (@preinit $preinit:path) => { $preinit };
+    (@preinit) => { $crate::__empty_preinit };
+}
+
+/// Declares the transitional callback used to populate each registry this mod contributes to.
+///
+/// The callback runs once per registry, in registry load order and contributor mod order,
+/// before ordinary `declare_mod!` initialization begins:
+///
+/// ```ignore
+/// fn load_registry(reg: &mut Registry, registry: RegistryId) {
+///     reg.entry("example").tag("example/tag");
+/// }
+/// weft_sdk::declare_registry_init!(load_registry);
+/// ```
+#[macro_export]
+macro_rules! declare_registry_init {
+    ($init:path $(,)?) => {
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn weft_registry_init(
+            host: *const $crate::abi::Host,
+            me: $crate::abi::ModId,
+            registry: $crate::abi::RegistryId,
+            reg: *mut $crate::abi::Registrar,
+        ) -> u32 {
+            unsafe { $crate::__registry_init(host, me, registry, reg, env!("CARGO_CRATE_NAME"), $init) }
+        }
+    };
+}
+
+/// Legacy static declaration helper for registries owned by this mod and registries it contributes to.
+///
+/// Prefer `declare_mod!(..., preinit: preinit, init: init)` with `MetaRegistry::registry` and
+/// `MetaRegistry::contribute_to`. This macro remains available for compatibility.
+///
+/// The declaration is read by the loader before any mod's `init` callback runs. A registry
+/// listed under `registries` is owned by this mod. A registry listed under `contributes_to`
+/// must be declared by some loaded mod; this mod is then scheduled as a contributor.
+///
+/// Use this macro at crate root at most once:
+///
+/// ```ignore
+/// weft_sdk::declare_registries!(
+///     registries: ["arcana:spell"],
+///     contributes_to: ["base:creative_tab"],
+/// );
+/// ```
+#[macro_export]
+macro_rules! declare_registries {
+    (
+        registries: [$($registry:literal),* $(,)?],
+        contributes_to: [$($contribution:literal),* $(,)?] $(,)?
+    ) => {
+        #[unsafe(no_mangle)]
+        pub extern "C" fn weft_registries() -> $crate::abi::RegistryDeclarations {
+            static REGISTRIES: &[$crate::abi::Str] = &[
+                $($crate::abi::Str::new($registry)),*
+            ];
+            static CONTRIBUTIONS: &[$crate::abi::Str] = &[
+                $($crate::abi::Str::new($contribution)),*
+            ];
+            $crate::abi::RegistryDeclarations {
+                registries: $crate::abi::Slice::new(REGISTRIES),
+                contributes_to: $crate::abi::Slice::new(CONTRIBUTIONS),
+            }
+        }
+    };
+    (registries: [$($registry:literal),* $(,)?] $(,)?) => {
+        $crate::declare_registries!(
+            registries: [$($registry),*],
+            contributes_to: [],
+        );
+    };
+    (contributes_to: [$($contribution:literal),* $(,)?] $(,)?) => {
+        $crate::declare_registries!(
+            registries: [],
+            contributes_to: [$($contribution),*],
+        );
+    };
+}
+
+#[doc(hidden)]
+pub fn __empty_preinit(_: &mut MetaRegistry) {}
+
+#[doc(hidden)]
+pub unsafe fn __preinit(host: *const Host, me: ModId, reg: *mut abi::MetaRegistrar, id: &'static str, f: fn(&mut MetaRegistry)) -> u32 {
+    HOST.store(host as *mut Host, Ordering::Relaxed);
+    ME.store(me.0, Ordering::Relaxed);
+    let _ = MOD_ID.set(id);
+    install_panic_hook();
+    let mut meta = MetaRegistry::new(reg);
+    guard(|| f(&mut meta))
 }
 
 #[doc(hidden)]
@@ -164,9 +284,29 @@ pub unsafe fn __init(host: *const Host, me: ModId, reg: *mut abi::Registrar, id:
     ME.store(me.0, Ordering::Relaxed);
     let _ = MOD_ID.set(id);
     install_panic_hook();
-    let mut r = Registry { raw: reg, ns: id, derived: Vec::new() };
+    let mut r = Registry { raw: reg, ns: id, derived: Vec::new(), registry: None };
     REGISTRAR.store(reg, Ordering::Relaxed);
     let result = guard(|| f(&mut r));
+    REGISTRAR.store(std::ptr::null_mut(), Ordering::Relaxed);
+    result
+}
+
+#[doc(hidden)]
+pub unsafe fn __registry_init(
+    host: *const Host,
+    me: ModId,
+    registry: abi::RegistryId,
+    reg: *mut abi::Registrar,
+    id: &'static str,
+    f: fn(&mut Registry, abi::RegistryId),
+) -> u32 {
+    HOST.store(host as *mut Host, Ordering::Relaxed);
+    ME.store(me.0, Ordering::Relaxed);
+    let _ = MOD_ID.set(id);
+    install_panic_hook();
+    let mut r = Registry { raw: reg, ns: id, derived: Vec::new(), registry: Some(registry) };
+    REGISTRAR.store(reg, Ordering::Relaxed);
+    let result = guard(|| f(&mut r, registry));
     REGISTRAR.store(std::ptr::null_mut(), Ordering::Relaxed);
     result
 }
@@ -334,5 +474,25 @@ mod tests {
         assert!(ok("block", "base", "../item/x").is_err());
         assert!(ok("block", "base", "/x").is_err());
         assert!(ok("block", "base", "").is_err());
+    }
+}
+
+#[cfg(test)]
+mod registry_declaration_tests {
+    crate::declare_registries!(
+        registries: ["sdk_test:registry"],
+        contributes_to: ["base:creative_tab"],
+    );
+
+    #[test]
+    fn exports_owned_and_foreign_registry_declarations() {
+        let declarations = weft_registries();
+        let registries = unsafe { declarations.registries.as_slice() };
+        let contributions = unsafe { declarations.contributes_to.as_slice() };
+
+        assert_eq!(registries.len(), 1);
+        assert_eq!(unsafe { registries[0].as_str() }, "sdk_test:registry");
+        assert_eq!(contributions.len(), 1);
+        assert_eq!(unsafe { contributions[0].as_str() }, "base:creative_tab");
     }
 }

@@ -110,14 +110,14 @@ pub fn methods(kind: What) -> impl Iterator<Item = &'static Method> {
                     let mut records: Vec<_> = c
                         .game
                         .catalog
-                        .ids(weft_abi::entry_kind::RECORD)
+                        .ids(crate::entries::kind::RECORD)
                         .iter()
                         .collect();
                     records.sort_by_key(|(name, _)| *name);
                     for (_, &id) in records {
                         if let Some(method) = c
                             .components
-                            .bytes(weft_abi::entry_kind::RECORD as usize, id, component)
+                            .bytes(crate::entries::kind::RECORD as usize, id, component)
                             .and_then(weft_abi::data::from_bytes::<Method>)
                         {
                             found.push(method);

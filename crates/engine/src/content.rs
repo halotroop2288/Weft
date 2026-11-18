@@ -5,7 +5,8 @@ use std::sync::{Arc, OnceLock};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use weft_abi::{self as abi, BlockModel, Callback, ModId, RenderLayer, entry_kind as ek};
+use crate::entries::kind as ek;
+use weft_abi::{self as abi, BlockModel, Callback, ModId, RenderLayer};
 
 use crate::components::{self as comps, Components, RawValue};
 use crate::entries::{Entry, RawEntry};
@@ -760,7 +761,7 @@ pub struct DimensionDef {
     pub builtin: Option<fn(&Content, glam::IVec3, &mut [u32])>,
     /// Where players appear without a `spawn` callback.
     pub spawn_at: [i32; 3],
-    /// Its `entry_kind::TERRAIN`: fills cubes before `generator` runs.
+    /// Its `core:terrain`: fills cubes before `generator` runs.
     pub terrain: Option<Box<crate::server::terrain::Terrain>>,
     /// `comp::dimension::BARE`: only the features that name it.
     pub bare: bool,
@@ -1006,8 +1007,16 @@ fn seals_of(s: &StateInfo) -> u8 {
     covered_faces(s)
 }
 
+#[derive(Clone, Debug)]
+pub struct RegistryContents {
+    pub entries: Vec<Entry>,
+    pub ids: FxHashMap<String, u32>,
+}
+
 pub struct Content {
     pub mods: Vec<ModMeta>,
+    /// Entries contributed to each mod-declared registry, in stable name/id order.
+    pub registry_entries: FxHashMap<abi::RegistryId, RegistryContents>,
     pub states: Vec<StateInfo>,
     /// `states`, the parts read per block (`Tight`).
     pub tight: Vec<Tight>,
@@ -1083,6 +1092,30 @@ pub struct Content {
 }
 
 static CONTENT: OnceLock<Content> = OnceLock::new();
+
+/// Registries published between registry phases. Entries are immutable after insertion, so
+/// readers in later phases can safely retain pointers into these allocations.
+static REGISTRY_PHASES: OnceLock<std::sync::RwLock<FxHashMap<abi::RegistryId, Arc<RegistryContents>>>> = OnceLock::new();
+
+pub fn publish_registry(registry: abi::RegistryId, contents: RegistryContents) -> Result<(), String> {
+    let phases = REGISTRY_PHASES.get_or_init(|| std::sync::RwLock::new(FxHashMap::default()));
+    let mut phases = phases
+        .write()
+        .map_err(|_| "registry phase lock poisoned".to_string())?;
+    if phases.contains_key(&registry) {
+        return Err(format!("registry {} was frozen more than once", registry.0));
+    }
+    phases.insert(registry, Arc::new(contents));
+    Ok(())
+}
+
+/// Returns only fully frozen registries. The returned allocation remains owned by the phase map.
+pub fn registry_contents(registry: abi::RegistryId) -> Option<Arc<RegistryContents>> {
+    REGISTRY_PHASES
+        .get()
+        .and_then(|phases| phases.read().ok())
+        .and_then(|phases| phases.get(&registry).cloned())
+}
 
 pub fn content() -> &'static Content {
     CONTENT.get().expect("content not frozen yet")
@@ -1489,11 +1522,11 @@ impl Content {
                     let step = *self
                         .game
                         .catalog
-                        .ids(abi::entry_kind::STEP)
+                        .ids(ek::STEP)
                         .get(if m.step.is_empty() { abi::step::ADD } else { &m.step })?;
                     let phase = match m.phase.as_str() {
                         "" => steps.defs[step as usize].phase,
-                        p => *self.game.catalog.ids(abi::entry_kind::PHASE).get(p)?,
+                        p => *self.game.catalog.ids(ek::PHASE).get(p)?,
                     };
                     let when = (!m.when.is_empty())
                         .then(|| self.condition(&m.when.join(" & ")))
@@ -1612,12 +1645,15 @@ impl Content {
 pub struct RawRegistrar {
     pub owner: ModId,
     pub game: crate::registry::RawGame,
+    pub registry_entries: Vec<crate::entries::RawRegistryEntry>,
+    /// Set only while this registrar's per-registry callback is executing.
+    pub active_registry: Option<abi::RegistryId>,
     pub errors: Vec<String>,
 }
 
 impl RawRegistrar {
     pub fn new(owner: ModId) -> Self {
-        RawRegistrar { owner, game: Default::default(), errors: Vec::new() }
+        RawRegistrar { owner, game: Default::default(), registry_entries: Vec::new(), active_registry: None, errors: Vec::new() }
     }
 }
 
@@ -1788,12 +1824,12 @@ fn picture_exists(mods: &[ModMeta], name: &str) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn creative_tabs(
     mods: &[ModMeta],
-    raw: Vec<RawEntry>,
+    registry: Option<&RegistryContents>,
     items: &[ItemDef],
     item_names: &FxHashMap<String, u32>,
     c: &Components,
     tables: &mut crate::entries::Tables,
-    mod_name: &dyn Fn(ModId) -> String,
+    registry_id: abi::RegistryId,
     errors: &mut Vec<String>,
 ) -> Vec<CreativeTab> {
     fn tab<'a>(tabs: &'a mut Vec<CreativeTab>, name: &str, icon: u32) -> &'a mut CreativeTab {
@@ -1803,15 +1839,17 @@ fn creative_tabs(
         });
         &mut tabs[i]
     }
-    let (made, _) = tables.bake(raw, abi::entry_kind::CREATIVE_TAB, mod_name, errors, |e, errors| {
-        let icon = e.text(abi::comp::CREATIVE_TAB_ICON).unwrap_or_default();
-        let Some(&icon) = item_names.get(icon) else {
-            errors.push(format!("creative tab {}: unknown icon item {icon}", e.name));
-            return None;
-        };
-        Some(CreativeTab { name: e.name.clone(), icon, items: Vec::new() })
-    });
-    let mut tabs: Vec<CreativeTab> = made.into_iter().flatten().collect();
+    let mut tabs = Vec::new();
+    if let Some(registry) = registry {
+        for entry in &registry.entries {
+            let icon_name = entry.text("creative_tab.icon").unwrap_or_default();
+            let Some(&icon) = item_names.get(icon_name) else {
+                errors.push(format!("creative tab {}: unknown icon item {icon_name}", entry.name));
+                continue;
+            };
+            tabs.push(CreativeTab { name: entry.name.clone(), icon, items: Vec::new() });
+        }
+    }
     // Every entity's egg goes here, whichever mod's it is. Its icon is the first of them.
     tab(&mut tabs, "core:spawn_eggs", 0);
     // The tag `tab/<name>` of each tab, by component id.
@@ -1873,7 +1911,7 @@ fn creative_tabs(
     }
     tables
         .1
-        .set(abi::entry_kind::CREATIVE_TAB, tabs.iter().map(|t| t.name.as_str()));
+        .set_registry(registry_id, tabs.iter().map(|t| t.name.as_str()));
     tabs
 }
 
@@ -1937,13 +1975,61 @@ struct Lookups<'a> {
     components: &'a Components,
 }
 
-/// Merges per-mod registrars into frozen content. Ids are assigned in name order, so they do not
-/// depend on which mod finished registering first. The order of the stages is the meaning here:
-/// each one reads what the ones before it settled.
+/// Fold and validate one registry immediately after its contributors have run.
+pub fn freeze_registry(name: &str, raw: Vec<RawEntry>, mod_name: &dyn Fn(ModId) -> String) -> Result<RegistryContents, Vec<String>> {
+    let mut errors = Vec::new();
+    let mut folded = crate::entries::fold(name, raw, mod_name, &mut errors);
+    folded.report_missing(&mut errors);
+    for (owner, pattern, matched) in folded.apply_patterns(&mut errors) {
+        if !matched {
+            errors.push(format!("{}: pattern {pattern} matched no entries in registry {name}", mod_name(owner)));
+        }
+    }
+    folded.entries.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let mut component_schemas: FxHashMap<String, String> = FxHashMap::default();
+    for entry in &folded.entries {
+        for value in &entry.values {
+            if let Some(schema) = component_schemas.get(&value.name) {
+                if schema != &value.schema {
+                    errors.push(format!(
+                        "registry {name}: component {} has schema {} on {}, but {} elsewhere",
+                        value.name, value.schema, entry.name, schema
+                    ));
+                }
+            } else {
+                component_schemas.insert(value.name.clone(), value.schema.clone());
+            }
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+
+    // Generic registry handles are assigned in the same stable name order as their lookup IDs.
+    for (id, entry) in folded.entries.iter().enumerate() {
+        for &cell in &entry.cells {
+            crate::registry::write_cell(cell, id as u32);
+        }
+    }
+
+    let ids = folded
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(id, entry)| (entry.name.clone(), id as u32))
+        .collect();
+    Ok(RegistryContents { entries: folded.entries, ids })
+}
+
+/// Merges per-mod registrars into frozen content. Generic registries have already been
+/// folded and published one phase at a time before this final game-content assembly.
 /// `step_order` is the pack's own order of steps (`config/step_order.txt`).
 pub fn freeze(
     mut mods: Vec<ModMeta>,
     regs: Vec<RawRegistrar>,
+    meta_registry: crate::meta_registry::FrozenMetaRegistry,
+    registry_entries: FxHashMap<abi::RegistryId, RegistryContents>,
     step_order: &str,
     core_assets: &std::path::Path,
 ) -> Result<Content, Vec<String>> {
@@ -1952,19 +2038,19 @@ pub fn freeze(
         m.order = *o;
     }
     let mut errors: Vec<String> = Vec::new();
-    let mut games = merge_registrars(&mods, regs, &mut errors);
     let mod_name = |m: ModId| {
         mods.get(m.0 as usize)
             .map_or("the engine".to_string(), |m| m.id.clone())
     };
+    let mut games = merge_registrars(&mods, regs, &mut errors);
     // Folded now: templates copy their items.
-    let item = abi::entry_kind::ITEM;
+    let item = ek::ITEM;
     let mut raw_items = vec![RawEntry::engine(item, "core:empty").set(abi::comp::LAYERS, String::new())];
     raw_items.extend(entries_of(&mut games, item));
-    let mut items = crate::entries::fold(abi::entry_kind::NAMES[item as usize], raw_items, &mod_name, &mut errors);
+    let mut items = crate::entries::fold(ek::NAMES[item as usize], raw_items, &mod_name, &mut errors);
     // Folded now: a liquid hot enough has its block burn what touches it.
-    let liquid = abi::entry_kind::LIQUID;
-    let mut liquids = crate::entries::fold(abi::entry_kind::NAMES[liquid as usize], entries_of(&mut games, liquid), &mod_name, &mut errors);
+    let liquid = ek::LIQUID;
+    let mut liquids = crate::entries::fold(ek::NAMES[liquid as usize], entries_of(&mut games, liquid), &mod_name, &mut errors);
     liquids.apply_patterns(&mut errors);
     let hot: Vec<String> = liquids
         .entries
@@ -1973,14 +2059,14 @@ pub fn freeze(
         .map(|e| e.name.clone())
         .collect();
     let mut tables = crate::entries::Tables::default();
-    let tint_kinds = freeze_tints(entries_of(&mut games, abi::entry_kind::TINT_KIND), &mut tables, &mod_name, &mut errors);
+    let tint_kinds = freeze_tints(entries_of(&mut games, ek::TINT_KIND), &mut tables, &mod_name, &mut errors);
 
     let mut textures = Interner::new(vec!["core:missing".into()]);
     // No texture named is the missing one.
     textures.ids.insert(String::new(), 0);
     let crack_textures: [u32; 10] = std::array::from_fn(|i| textures.id(&format!("core:block/destroy_{i}")));
     let fire_texture = textures.id("core:block/fire");
-    let raw_blocks = entries_of(&mut games, abi::entry_kind::BLOCK);
+    let raw_blocks = entries_of(&mut games, ek::BLOCK);
     let read_model = |name: &str| model_file(&mods, name);
     let liquid_names: Vec<String> = liquids.entries.iter().map(|e| e.name.clone()).collect();
     let mut block_tables =
@@ -1995,9 +2081,9 @@ pub fn freeze(
     let shares_specs = std::mem::take(&mut block_tables.shares);
     let retextures = std::mem::take(&mut block_tables.retextures);
     let (item_tables, item_looks) = number_items(&mods, items, &block_tables, &retextures, &mut textures, &mut errors);
-    let biome_tables = number_biomes(entries_of(&mut games, abi::entry_kind::BIOME), &tint_kinds, &mod_name, &mut errors);
-    let dim_tables = number_dimensions(&mods, entries_of(&mut games, abi::entry_kind::DIMENSION), &mod_name, &mut errors);
-    let entities = crate::registry::freeze_entities(entries_of(&mut games, abi::entry_kind::ENTITY), &mod_name, &mut errors);
+    let biome_tables = number_biomes(entries_of(&mut games, ek::BIOME), &tint_kinds, &mod_name, &mut errors);
+    let dim_tables = number_dimensions(&mods, entries_of(&mut games, ek::DIMENSION), &mod_name, &mut errors);
+    let entities = crate::registry::freeze_entities(entries_of(&mut games, ek::ENTITY), &mod_name, &mut errors);
 
     let decls = crate::registry::freeze_components(&mut games, &mod_name, &mut errors);
     let builder = declare_components(
@@ -2011,15 +2097,39 @@ pub fn freeze(
         &dim_tables,
         &liquids,
         &tables,
+        &meta_registry,
+        &registry_entries,
         &mut errors,
     );
     if !errors.is_empty() {
         return Err(errors);
     }
-    let (mut components, ref_lists, named_matchers) =
-        fill_components(builder, &block_tables, &item_tables, &entities, &biome_tables, &dim_tables, &tint_kinds, &mut errors);
+    let (mut components, ref_lists, named_matchers) = fill_components(
+        builder,
+        &block_tables,
+        &item_tables,
+        &entities,
+        &biome_tables,
+        &dim_tables,
+        &tint_kinds,
+        &meta_registry,
+        &mut errors,
+    );
     // In the order the values got their ids.
     let mut matchers = crate::refs::Matchers::new(block_tables.states.len());
+    for &registry_id in meta_registry.load_order() {
+        let Some(entries) = registry_entries.get(&registry_id) else { continue };
+        // Core registries use their specialized runtime tables, filled below. Generic registry
+        // contributions get a dedicated table at their RegistryId.
+        if meta_registry
+            .registry(registry_id)
+            .is_some_and(|registry| registry.runtime_kind.is_some())
+        {
+            continue;
+        }
+        let mut matcher = |text: &str, c: &Components| matchers.add(text, &block_tables.block_names, &block_tables.block_defs, c);
+        components.add_registry_table(registry_id, &entries.entries, &mut matcher, &mut errors);
+    }
     for (text, who) in &named_matchers {
         if let Err(e) = matchers.add(text, &block_tables.block_names, &block_tables.block_defs, &components) {
             errors.push(format!("{who}: {e}"));
@@ -2068,7 +2178,7 @@ pub fn freeze(
     let made = Made { templates: &templates, template_names: &template_names, palette_names: &palette_names };
     freeze_features(&mut games, &mut dim_defs, look, made, &mut matchers, &mut tables, &mod_name, &mut errors);
     // Mods' own data: only its table, which mods read.
-    let rk = abi::entry_kind::RECORD;
+    let rk = ek::RECORD;
     tables.bake(entries_of(&mut games, rk), rk, &mod_name, &mut errors, |_, _| ());
     build_terrains(&mut games, &mut dim_defs, &biome_names, &biome_rules, look, &mut tables, &mod_name, &mut errors);
     let commands = freeze_commands(&mods, &mut games, &mut errors);
@@ -2083,8 +2193,12 @@ pub fn freeze(
     }
     let (item_liquid, containers) = item_containers(&item_defs, &liquids, &components, &mut errors);
     let (fluid_items, item_fluid) = fluid_items(&item_defs, &liquids, &components, &mut errors);
-    let tabs = entries_of(&mut games, abi::entry_kind::CREATIVE_TAB);
-    let creative_tabs = creative_tabs(&mods, tabs, &item_defs, &item_names, &components, &mut tables, &mod_name, &mut errors);
+    let creative_tab_id = meta_registry
+        .find("base:creative_tab")
+        .expect("base:creative_tab registry is declared");
+    let creative_tab_registry = registry_entries.get(&creative_tab_id);
+    let creative_tabs =
+        creative_tabs(&mods, creative_tab_registry, &item_defs, &item_names, &components, &mut tables, creative_tab_id, &mut errors);
     let loot = freeze_loot(&mut games, &item_defs, &item_names, look, &mut tables, &mut conds, &mod_name, &mut errors);
     let stack_flags = collect_stack_flags(&decls, &components);
     let order_of = |m: ModId| mods.get(m.0 as usize).map_or(u32::MAX, |m| m.order);
@@ -2107,10 +2221,14 @@ pub fn freeze(
     );
     // The kinds frozen with the game (poses, entity effects ...) get their tables before what
     // reads them.
-    for (kind, entries) in &mut tables.0 {
-        game.catalog.bind(*kind, entries);
+    for (registry, entries) in &mut tables.0 {
+        let kind = meta_registry
+            .registry(*registry)
+            .and_then(|descriptor| descriptor.runtime_kind)
+            .expect("baked tables belong to specialized core registries");
+        game.catalog.bind(kind, entries);
         let mut matcher = |text: &str, c: &Components| matchers.add(text, &block_names, &block_defs, c);
-        components.add_table(*kind as usize, entries, &mut matcher, &mut errors);
+        components.add_table(kind as usize, entries, &mut matcher, &mut errors);
     }
     resolve_hazards(&mut states, raw_hazards, &mut game, &mut dim_defs, &components, &mut conds, &mut errors);
     let source_mods = resolve_source_mods(&game, &components, item_defs.len(), &mut conds, &mut errors);
@@ -2131,14 +2249,7 @@ pub fn freeze(
             continue;
         }
         let count = game.weathers.len() as u32;
-        match crate::refs::set(
-            &names.join(" "),
-            abi::entry_kind::WEATHER as usize,
-            game.catalog.ids(ek::WEATHER),
-            count,
-            &components,
-            "weather",
-        ) {
+        match crate::refs::set(&names.join(" "), ek::WEATHER as usize, game.catalog.ids(ek::WEATHER), count, &components, "weather") {
             Ok(w) => d.weathers = w,
             Err(e) => errors.push(format!("dimension {}: {e}", d.name)),
         }
@@ -2225,15 +2336,11 @@ pub fn freeze(
         .iter()
         .map(|s| if s.liquid_walls == u8::MAX { covered_faces(s) } else { s.liquid_walls })
         .collect();
-    for (kind, names) in [
-        (abi::entry_kind::BLOCK, block_names),
-        (abi::entry_kind::ITEM, item_names),
-        (abi::entry_kind::BIOME, biome_names),
-        (abi::entry_kind::DIMENSION, dim_names),
-    ] {
+    for (kind, names) in [(ek::BLOCK, block_names), (ek::ITEM, item_names), (ek::BIOME, biome_names), (ek::DIMENSION, dim_names)] {
         game.catalog.set_ids(kind, names);
     }
     Ok(Content {
+        registry_entries,
         liquid_walls,
         spread_targets,
         spread_search,
@@ -2334,11 +2441,11 @@ fn freeze_tints(
 ) -> Vec<(String, u32)> {
     let mut all: Vec<RawEntry> = [("core:grass", 0x8db360u32), ("core:foliage", 0x77ab2f), ("core:water", 0x3f76e4)]
         .iter()
-        .map(|&(name, color)| RawEntry::engine(abi::entry_kind::TINT_KIND, name).set(abi::comp::TINT_KIND_DEFAULT, color))
+        .map(|&(name, color)| RawEntry::engine(ek::TINT_KIND, name).set(abi::comp::TINT_KIND_DEFAULT, color))
         .collect();
     all.extend(raw);
-    let (mut tint_kinds, _) = tables
-        .bake(all, abi::entry_kind::TINT_KIND, mod_name, errors, |e, _| (e.name.clone(), e.or(abi::comp::TINT_KIND_DEFAULT, 0xFFFFFFu32)));
+    let (mut tint_kinds, _) =
+        tables.bake(all, ek::TINT_KIND, mod_name, errors, |e, _| (e.name.clone(), e.or(abi::comp::TINT_KIND_DEFAULT, 0xFFFFFFu32)));
     if tint_kinds.len() > abi::tint::MAX_KINDS as usize {
         errors.push(format!("{} tint kinds registered, at most {} fit", tint_kinds.len(), abi::tint::MAX_KINDS));
     }
@@ -2460,7 +2567,7 @@ fn number_biomes(
     errors: &mut Vec<String>,
 ) -> BiomeTables {
     use abi::comp::biome as b;
-    let kind = abi::entry_kind::BIOME;
+    let kind = ek::BIOME;
     let (made, biome_names) = crate::entries::bake_by(
         raw,
         kind,
@@ -2515,7 +2622,7 @@ fn number_biomes(
 
 /// Ids in name order, the engine's after the mods'.
 fn number_dimensions(mods: &[ModMeta], raw: Vec<RawEntry>, mod_name: &dyn Fn(ModId) -> String, errors: &mut Vec<String>) -> DimTables {
-    let kind = abi::entry_kind::DIMENSION;
+    let kind = ek::DIMENSION;
     let (made, _) = crate::entries::bake_by(
         raw,
         kind,
@@ -2565,6 +2672,8 @@ fn declare_components(
     dims: &DimTables,
     liquids: &crate::entries::Folded,
     tables: &crate::entries::Tables,
+    meta_registry: &crate::meta_registry::FrozenMetaRegistry,
+    registry_entries: &FxHashMap<abi::RegistryId, RegistryContents>,
     errors: &mut Vec<String>,
 ) -> comps::Builder {
     let crate::blocks::Blocks { block_defs, block_values, .. } = blocks;
@@ -2600,18 +2709,22 @@ fn declare_components(
         }
     }
     // The kinds whose tables come later, the engine's entries and settings among them.
-    let engine: Vec<RawEntry> = (0..abi::entry_kind::COUNT as u32)
+    let engine: Vec<RawEntry> = (0..ek::COUNT as u32)
         .flat_map(crate::registry::engine_entries)
         .chain(crate::config::engine_configs(&[]))
         .collect();
-    let later = |k: u32| k > abi::entry_kind::DIMENSION && !crate::entries::NO_TABLE.contains(&k);
-    for e in games
+    for (e, kind) in games
         .iter()
         .flat_map(|g| &g.entries)
         .chain(&engine)
-        .filter(|e| later(e.kind))
+        .filter_map(|entry| {
+            meta_registry
+                .registry(entry.registry)
+                .and_then(|registry| registry.runtime_kind.map(|kind| (entry, kind)))
+                .filter(|(_, kind)| *kind > ek::DIMENSION && !crate::entries::NO_TABLE.contains(kind))
+        })
     {
-        let who = || who(e.owner, &format!("{} {}", abi::entry_kind::NAMES[e.kind as usize], e.name));
+        let who = || who(e.owner, &format!("{} {}", ek::NAMES[kind as usize], e.name));
         for o in &e.ops {
             use abi::value_op as vo;
             match o.op {
@@ -2629,10 +2742,14 @@ fn declare_components(
         }
     }
     // Kinds baked before this, for what the others needed of them.
-    for (kind, entries) in &tables.0 {
+    for (registry, entries) in &tables.0 {
+        let kind = meta_registry
+            .registry(*registry)
+            .and_then(|descriptor| descriptor.runtime_kind)
+            .expect("baked tables belong to specialized core registries");
         for e in entries {
             for v in &e.values {
-                cb.declare_value(v, &|| who(e.owner, &format!("{} {}", abi::entry_kind::NAMES[*kind as usize], e.name)), errors);
+                cb.declare_value(v, &|| who(e.owner, &format!("{} {}", ek::NAMES[kind as usize], e.name)), errors);
             }
         }
     }
@@ -2643,6 +2760,15 @@ fn declare_components(
             .map(|c| c.size as usize)
             .filter(|&n| n != 0);
         cb.declare(&d.name, &d.schema, size, &|| who(d.owner, "component"), errors);
+    }
+    for &registry_id in meta_registry.load_order() {
+        let Some(contents) = registry_entries.get(&registry_id) else { continue };
+        let Some(descriptor) = meta_registry.registry(registry_id) else { continue };
+        for entry in &contents.entries {
+            for value in &entry.values {
+                cb.declare_value(value, &|| who(entry.owner, &format!("registry {}: {}", descriptor.name, entry.name)), errors);
+            }
+        }
     }
     cb
 }
@@ -2656,6 +2782,7 @@ fn fill_components(
     biomes: &BiomeTables,
     dims: &DimTables,
     tint_kinds: &[(String, u32)],
+    meta_registry: &crate::meta_registry::FrozenMetaRegistry,
     errors: &mut Vec<String>,
 ) -> (Components, std::rc::Rc<std::cell::RefCell<Vec<Vec<[u32; 2]>>>>, Vec<(String, String)>) {
     let crate::blocks::Blocks { states, block_defs, block_values, .. } = blocks;
@@ -2663,7 +2790,23 @@ fn fill_components(
     let BiomeTables { biome_defs, biome_values, .. } = biomes;
     let DimTables { dim_defs, dim_values, .. } = dims;
     let tint_names: Vec<String> = tint_kinds.iter().map(|k| k.0.clone()).collect();
-    cb.start(&[states.len(), item_defs.len(), entities.kinds.len(), biome_defs.len(), dim_defs.len()]);
+    let mut next_slot = comps::KINDS;
+    let registry_slots = meta_registry
+        .registries()
+        .iter()
+        .map(|registry| {
+            let slot = registry.runtime_kind.map_or_else(
+                || {
+                    let slot = next_slot;
+                    next_slot += 1;
+                    slot
+                },
+                |kind| kind as usize,
+            );
+            (registry.id, slot)
+        })
+        .collect();
+    cb.start_with_registry_slots(&[states.len(), item_defs.len(), entities.kinds.len(), biome_defs.len(), dim_defs.len()], registry_slots);
     // References in values (`block`, `blocks`, `item`) become ids here, so a typo is a load error.
     let ref_lists: std::rc::Rc<std::cell::RefCell<Vec<Vec<[u32; 2]>>>> = Default::default();
     {
@@ -2930,7 +3073,6 @@ fn freeze_features(
 ) {
     use crate::features::{Chance, FeatureDef, Fit, Shape, Spread, Write};
     use abi::comp::feature as f;
-    use abi::entry_kind as ek;
     let Lookups { block_defs, block_names, components, .. } = look;
     // (dimensions, def, stage, after, before)
     type Baked = (Vec<usize>, FeatureDef, u32, Vec<String>, Vec<String>);
@@ -3198,7 +3340,7 @@ fn freeze_palettes(
     mod_name: &dyn Fn(ModId) -> String,
     errors: &mut Vec<String>,
 ) -> (Vec<PaletteDef>, crate::entries::Names) {
-    let kind = abi::entry_kind::PALETTE;
+    let kind = ek::PALETTE;
     tables.bake(entries_of(games, kind), kind, mod_name, errors, |e, errors| {
         let mut slots = FxHashMap::default();
         for s in e.or::<Vec<abi::PaletteSlot>>(abi::comp::palette::SLOTS, Vec::new()) {
@@ -3246,7 +3388,7 @@ fn freeze_templates(
             }
         }
     }
-    let kind = abi::entry_kind::TEMPLATE;
+    let kind = ek::TEMPLATE;
     let make = |name: &str, own: crate::template::Parts, e: Option<&Entry>, errors: &mut Vec<String>| {
         let mut parts = own;
         if let Some(e) = e {
@@ -3323,7 +3465,7 @@ fn build_terrains(
     mod_name: &dyn Fn(ModId) -> String,
     errors: &mut Vec<String>,
 ) {
-    let kind = abi::entry_kind::TERRAIN;
+    let kind = ek::TERRAIN;
     let mut raw = entries_of(games, kind);
     raw.sort_by_key(|e| {
         look.dim_names
@@ -3353,7 +3495,7 @@ fn collect_word_sets(
     mod_name: &dyn Fn(ModId) -> String,
     errors: &mut Vec<String>,
 ) -> FxHashMap<String, Vec<String>> {
-    use abi::entry_kind::WORDS;
+    use ek::WORDS;
     let gizmos: Vec<String> = crate::client::gizmo::BUILTIN
         .iter()
         .map(|g| g.to_string())
@@ -3634,13 +3776,13 @@ fn resolve_source_mods(
                     return None;
                 };
                 let step_name = if m.step.is_empty() { abi::step::ADD } else { &m.step };
-                let Some(&step) = game.catalog.ids(abi::entry_kind::STEP).get(step_name) else {
+                let Some(&step) = game.catalog.ids(ek::STEP).get(step_name) else {
                     errors.push(format!("modifier of {}: no step {step_name}", m.attribute));
                     return None;
                 };
                 let phase = match m.phase.as_str() {
                     "" => steps.defs[step as usize].phase,
-                    p => match game.catalog.ids(abi::entry_kind::PHASE).get(p) {
+                    p => match game.catalog.ids(ek::PHASE).get(p) {
                         Some(&p) => p,
                         None => {
                             errors.push(format!("modifier of {}: no phase {p}", m.attribute));
@@ -3673,8 +3815,8 @@ fn resolve_source_mods(
     };
     of(comps::ITEM, items, &mut out.items);
     of(comps::ENTITY, game.entities.len(), &mut out.kinds);
-    of(abi::entry_kind::POSE as usize, game.poses.len(), &mut out.poses);
-    of(abi::entry_kind::ENTITY_EFFECT as usize, game.entity_effects.len(), &mut out.effects);
+    of(ek::POSE as usize, game.poses.len(), &mut out.poses);
+    of(ek::ENTITY_EFFECT as usize, game.entity_effects.len(), &mut out.effects);
     out
 }
 
@@ -3689,7 +3831,7 @@ fn freeze_loot(
     errors: &mut Vec<String>,
 ) -> FxHashMap<String, crate::loot::Table> {
     let Lookups { block_defs, .. } = look;
-    let raw = entries_of(games, abi::entry_kind::LOOT);
+    let raw = entries_of(games, ek::LOOT);
     // A block without a table of its own drops its item when harvested: a table of the engine's,
     // which mods edit like any.
     let own: FxHashSet<&str> = raw
@@ -3704,12 +3846,12 @@ fn freeze_loot(
             let item = item_defs[1..]
                 .iter()
                 .find(|i| i.block == Some(b.first_state))?;
-            Some(RawEntry::engine(abi::entry_kind::LOOT, &b.name).set(abi::comp::loot::POOLS, vec![crate::loot::harvested(&item.name)]))
+            Some(RawEntry::engine(ek::LOOT, &b.name).set(abi::comp::loot::POOLS, vec![crate::loot::harvested(&item.name)]))
         })
         .collect();
     all.extend(raw);
     let mut resolve = crate::loot::Resolve { items: item_names, conds };
-    let (made, _) = tables.bake(all, abi::entry_kind::LOOT, mod_name, errors, |e, errors| (e.name.clone(), resolve.table(e, errors)));
+    let (made, _) = tables.bake(all, ek::LOOT, mod_name, errors, |e, errors| (e.name.clone(), resolve.table(e, errors)));
     made.into_iter().collect()
 }
 
@@ -3927,7 +4069,7 @@ fn freeze_liquids(
     use abi::comp::{liquid as l, reaction as r};
     let blocks = look.block_defs;
     let (liquids, _) = tables.finish(
-        abi::entry_kind::LIQUID,
+        ek::LIQUID,
         folded,
         errors,
         |e| e.name.clone(),
@@ -3983,7 +4125,7 @@ fn freeze_liquids(
             st.collision.clear();
         }
     }
-    let kind = abi::entry_kind::REACTION;
+    let kind = ek::REACTION;
     let (reactions, _) = tables.bake(entries_of(games, kind), kind, mod_name, errors, |e, errors| -> Option<_> {
         let what = format!("liquid reaction {}", e.name);
         let mut matcher = |name: &str, errors: &mut Vec<String>| look.matcher(matchers, e.text(name).unwrap_or_default(), &what, errors);
@@ -4038,6 +4180,58 @@ fn freeze_liquids(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn generic_entry(owner: u32, name: &str, component: &str, schema: &str, bytes: Vec<u8>) -> RawEntry {
+        RawEntry {
+            owner: ModId(owner),
+            registry: abi::RegistryId(0),
+            name: name.into(),
+            cell: 0,
+            mode: abi::entry_mode::NEW,
+            ops: vec![crate::entries::RawOp {
+                op: abi::value_op::SET,
+                value: RawValue { name: component.into(), schema: schema.into(), bytes, text: None },
+                anchor: String::new(),
+            }],
+            parts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn generic_registry_freezes_entries_in_stable_name_order() {
+        let iron_cell = std::sync::atomic::AtomicU32::new(u32::MAX);
+        let zinc_cell = std::sync::atomic::AtomicU32::new(u32::MAX);
+        let mut zinc = generic_entry(1, "example:zinc", "hardness", "u32", 4u32.to_le_bytes().to_vec());
+        zinc.cell = &zinc_cell as *const _ as usize;
+        let mut iron = generic_entry(1, "example:iron", "hardness", "u32", 7u32.to_le_bytes().to_vec());
+        iron.cell = &iron_cell as *const _ as usize;
+
+        let contents = freeze_registry("example:material", vec![zinc, iron], &|id| format!("mod{}", id.0)).unwrap();
+
+        assert_eq!(contents.ids.get("example:iron"), Some(&0));
+        assert_eq!(contents.ids.get("example:zinc"), Some(&1));
+        assert_eq!(contents.entries[0].get::<u32>("hardness"), Some(7));
+        assert_eq!(iron_cell.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(zinc_cell.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn generic_registry_rejects_inconsistent_component_schemas() {
+        let errors = freeze_registry(
+            "example:material",
+            vec![
+                generic_entry(1, "example:iron", "hardness", "u32", 7u32.to_le_bytes().to_vec()),
+                generic_entry(2, "example:copper", "hardness", "f32", 1.5f32.to_le_bytes().to_vec()),
+            ],
+            &|id| format!("mod{}", id.0),
+        )
+        .unwrap_err();
+
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("hardness"));
+        assert!(errors[0].contains("u32"));
+        assert!(errors[0].contains("f32"));
+    }
 
     #[test]
     fn packed_faces_require_full_cube_geometry() {

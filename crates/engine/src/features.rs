@@ -7,8 +7,8 @@
 //! so every cube and every client agrees. A start on a grid is worked out once (`DimensionDef::starts`) and
 //! each cube it reaches takes its part.
 
+use crate::entries::kind as ek;
 use std::sync::Arc;
-use weft_abi::entry_kind as ek;
 
 use glam::{DVec3, IVec3};
 use weft_abi as abi;

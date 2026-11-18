@@ -10,14 +10,14 @@
 //! if let Some(ticks) = FUEL.on_item(stack.item) { .. }
 //! if PLANT_SOIL.on_block(w.get(below)) { .. }
 //! ```
-//! Lookups read the engine's frozen tables directly (one load and a bit test, no host call).
+//! Lookups read the engine's frozen tables directly after resolving a component id, without a host call per read.
 //! Every use of a name must agree on its value type; the engine checks that at startup and names
 //! the mod and entry that disagree.
 
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
-use crate::abi::{self, ItemStack, Str, entry_kind as ek};
+use crate::abi::{self, ItemStack, RegistryId, Str};
 use crate::host;
 
 pub use abi::data::Data;
@@ -236,21 +236,53 @@ fn component_table() -> Option<&'static abi::ComponentTable> {
     Some(unsafe { &*p })
 }
 
+/// Read a generic registry entry directly while its phase is frozen but the global component
+/// table has not yet been assembled.
+fn staged_registry_value<T: Data>(registry: RegistryId, entry: u32, name: &str) -> Option<T> {
+    if crate::registry_entry_count(registry) == 0 {
+        return None;
+    }
+    let (mut schema, mut len) = (Str::EMPTY, 0usize);
+    let ptr = unsafe { (host().registry_entry_component)(registry, entry, Str::new(name), &mut schema, &mut len) };
+    if ptr.is_null() || unsafe { schema.as_str() } != schema_of::<T>() {
+        return None;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+    abi::data::from_bytes(bytes)
+}
+
+/// Whether a generic registry entry has a component while the global component table is unavailable.
+fn staged_registry_has(registry: RegistryId, entry: u32, name: &str) -> bool {
+    let (mut schema, mut len) = (Str::EMPTY, 0usize);
+    let ptr = unsafe { (host().registry_entry_component)(registry, entry, Str::new(name), &mut schema, &mut len) };
+    !ptr.is_null()
+}
+
+/// Whether a generic registry entry has a tag while the global component table is unavailable.
+fn staged_registry_tag(registry: RegistryId, entry: u32, name: &str) -> bool {
+    if crate::registry_entry_count(registry) == 0 {
+        return false;
+    }
+    let (mut schema, mut len) = (Str::EMPTY, 0usize);
+    let ptr = unsafe { (host().registry_entry_component)(registry, entry, Str::new(name), &mut schema, &mut len) };
+    !ptr.is_null() && len == 0 && unsafe { schema.as_str().is_empty() }
+}
+
 #[inline]
-fn table_has(kind: u32, entry: u32, comp: u32) -> bool {
+fn table_has(registry: RegistryId, entry: u32, comp: u32) -> bool {
     let Some(t) = component_table() else { return false };
-    let k = &t.kinds[kind as usize];
+    let Some(k) = (unsafe { t.registries.as_slice() }).get(registry.0 as usize) else { return false };
     if entry >= k.entries || comp >= t.components {
         return false;
     }
     unsafe { *k.bits.add((entry * k.words + comp / 64) as usize) >> (comp % 64) & 1 != 0 }
 }
 
-/// How many entries of `kind` (`abi::entry_kind`) there are, blocks counted by state; 0 before
+/// How many entries a registry has, blocks counted by state; 0 before
 /// the registries are frozen.
-pub fn entry_count(kind: u32) -> u32 {
+pub fn entry_count(registry: RegistryId) -> u32 {
     component_table()
-        .and_then(|t| t.kinds.get(kind as usize))
+        .and_then(|t| unsafe { t.registries.as_slice() }.get(registry.0 as usize))
         .map_or(0, |k| k.entries)
 }
 
@@ -260,64 +292,48 @@ pub fn component_info(id: u32) -> Option<(&'static str, &'static str)> {
     (unsafe { (host().component_info)(id, &mut name, &mut schema) } != 0).then(|| unsafe { (name.as_str(), schema.as_str()) })
 }
 
-/// Every component and tag entry `id` of `kind` has, by name and schema: what a thing is, for a
+/// Every component and tag entry `id` of `registry` has, by name and schema: what a thing is, for a
 /// mod showing it (WAILA) or building on any mod's things. Values are read with the components'
 /// handles, `Component::on_block` and the like.
-pub fn components_of(kind: u32, id: u32) -> Vec<(&'static str, &'static str)> {
+pub fn components_of(registry: RegistryId, id: u32) -> Vec<(&'static str, &'static str)> {
     let Some(t) = component_table() else { return Vec::new() };
     (0..t.components)
-        .filter(|&c| table_has(kind, id, c))
+        .filter(|&c| table_has(registry, id, c))
         .filter_map(component_info)
         .collect()
 }
 
-/// Every entry of `kind` with component or tag `name`: all logs (`entries_with(BLOCK, "logs")`,
+/// Every component and tag on an entry in a registry.
+pub fn components_of_registry(registry: abi::RegistryId, entry: u32) -> Vec<(&'static str, &'static str)> {
+    components_of(registry, entry)
+}
+
+/// Every entry in a registry with component or tag `name`.
+pub fn registry_entries_with(registry: abi::RegistryId, name: &str) -> Vec<u32> {
+    if component_table().is_some() {
+        return entries_with(registry, name);
+    }
+    (0..crate::registry_entry_count(registry))
+        .filter(|&entry| staged_registry_has(registry, entry, name))
+        .collect()
+}
+
+/// Every entry of `registry` with component or tag `name`: all logs (`entries_with(block_registry, "logs")`,
 /// one per state), every ore.
-pub fn entries_with(kind: u32, name: &str) -> Vec<u32> {
+pub fn entries_with(registry: RegistryId, name: &str) -> Vec<u32> {
     let Some(t) = component_table() else { return Vec::new() };
     let Some(comp) = (0..t.components).find(|&c| component_info(c).is_some_and(|(n, _)| n == name)) else { return Vec::new() };
-    (0..entry_count(kind))
-        .filter(|&e| table_has(kind, e, comp))
+    (0..entry_count(registry))
+        .filter(|&e| table_has(registry, e, comp))
         .collect()
 }
 
 const UNRESOLVED: u32 = u32::MAX - 1;
 const MISSING: u32 = u32::MAX;
-/// Kinds whose place in the table a handle caches (block to dimension: what hot code reads);
-/// the others are looked up on each read.
-const CACHED: usize = ek::DIMENSION as usize + 1;
 
 static NO_BITS: u64 = 0;
 
-/// Where one component sits in one kind's table, cached in its handle on first use so a check
-/// is one dependent load.
-struct Slot {
-    /// The word holding this component's bit in entry 0's row; null until filled.
-    bits: AtomicPtr<u64>,
-    words: AtomicU32,
-    entries: AtomicU32,
-    data: AtomicPtr<u8>,
-    stride: AtomicU32,
-}
-
-impl Slot {
-    const fn new() -> Slot {
-        Slot {
-            bits: AtomicPtr::new(std::ptr::null_mut()),
-            words: AtomicU32::new(0),
-            entries: AtomicU32::new(0),
-            data: AtomicPtr::new(std::ptr::null_mut()),
-            stride: AtomicU32::new(0),
-        }
-    }
-}
-
-struct Lookup {
-    id: AtomicU32,
-    slots: [Slot; CACHED],
-}
-
-/// Where one component sits in one kind's table: its bit's word in entry 0's row.
+/// Where one component sits in a registry's table.
 struct Place {
     bits: *const u64,
     words: u32,
@@ -326,9 +342,13 @@ struct Place {
     stride: u32,
 }
 
+struct Lookup {
+    id: AtomicU32,
+}
+
 impl Lookup {
     const fn new() -> Lookup {
-        Lookup { id: AtomicU32::new(UNRESOLVED), slots: [const { Slot::new() }; CACHED] }
+        Lookup { id: AtomicU32::new(UNRESOLVED) }
     }
 
     fn id(&self, name: &str, schema: &dyn Fn() -> String) -> u32 {
@@ -345,65 +365,39 @@ impl Lookup {
         id
     }
 
-    /// Where it sits in `kind`'s table: cached in the handle for the first kinds.
-    #[inline]
-    fn place(&self, kind: u32, name: &str, schema: &dyn Fn() -> String) -> Option<Place> {
-        let Some(s) = self.slots.get(kind as usize) else { return self.find(kind, name, schema) };
-        let mut bits = s.bits.load(Ordering::Acquire);
-        if bits.is_null() {
-            bits = self.fill(kind, name, schema);
-            if bits.is_null() {
-                return None;
-            }
-        }
-        Some(Place {
-            bits,
-            words: s.words.load(Ordering::Relaxed),
-            entries: s.entries.load(Ordering::Relaxed),
-            data: s.data.load(Ordering::Relaxed),
-            stride: s.stride.load(Ordering::Relaxed),
-        })
-    }
-
-    fn find(&self, kind: u32, name: &str, schema: &dyn Fn() -> String) -> Option<Place> {
+    fn find(&self, registry: RegistryId, name: &str, schema: &dyn Fn() -> String) -> Option<Place> {
         let id = self.id(name, schema);
         let t = component_table()?;
-        let k = t.kinds.get(kind as usize)?;
+        let table = unsafe { t.registries.as_slice() }.get(registry.0 as usize)?;
         if id >= t.components {
-            // Nothing uses it: every check says no.
             return Some(Place { bits: &NO_BITS, words: 0, entries: 0, data: std::ptr::null(), stride: 0 });
         }
-        let col = unsafe { *k.columns.add(id as usize) };
+        let col = unsafe { *table.columns.add(id as usize) };
         Some(Place {
-            bits: unsafe { k.bits.add((id / 64) as usize) },
-            words: k.words,
-            entries: k.entries,
+            bits: unsafe { table.bits.add((id / 64) as usize) },
+            words: table.words,
+            entries: table.entries,
             data: col.data,
             stride: col.stride,
         })
     }
 
     #[inline]
-    fn has(&self, kind: u32, entry: u32, name: &str, schema: &dyn Fn() -> String) -> bool {
-        self.place(kind, name, schema)
-            .is_some_and(|p| self.has_at(&p, entry))
+    fn has(&self, registry: RegistryId, entry: u32, name: &str, schema: &dyn Fn() -> String) -> bool {
+        self.find(registry, name, schema).is_some_and(|p| {
+            entry < p.entries && unsafe { *p.bits.add((entry * p.words) as usize) } >> (self.id.load(Ordering::Relaxed) % 64) & 1 != 0
+        })
     }
 
     #[inline]
-    fn has_at(&self, p: &Place, entry: u32) -> bool {
-        entry < p.entries && unsafe { *p.bits.add((entry * p.words) as usize) } >> (self.id.load(Ordering::Relaxed) % 64) & 1 != 0
-    }
-
-    #[inline]
-    fn read<T: Data>(&self, kind: u32, entry: u32, name: &str, schema: &dyn Fn() -> String) -> Option<T> {
-        let p = self.place(kind, name, schema)?;
-        if !self.has_at(&p, entry) {
+    fn read<T: Data>(&self, registry: RegistryId, entry: u32, name: &str, schema: &dyn Fn() -> String) -> Option<T> {
+        let p = self.find(registry, name, schema)?;
+        if entry >= p.entries || unsafe { *p.bits.add((entry * p.words) as usize) } >> (self.id.load(Ordering::Relaxed) % 64) & 1 == 0 {
             return None;
         }
         let stride = p.stride as usize;
         let at = unsafe { p.data.add(entry as usize * stride) };
         let mut cell = unsafe { std::slice::from_raw_parts(at as *const u8, stride) };
-        // Frozen text already owns a stable view; no decoding or interning is needed.
         if std::any::TypeId::of::<T>() == std::any::TypeId::of::<Text>() {
             return (stride == size_of::<Text>()).then(|| unsafe { std::ptr::read_unaligned(at as *const T) });
         }
@@ -412,7 +406,6 @@ impl Lookup {
                 .then(|| T::read(&mut cell))
                 .flatten();
         }
-        // Text is kept as a `Str`, other packed values as a `Slice` of their bytes.
         let (ptr, len) = unsafe { std::ptr::read_unaligned(at as *const (*const u8, usize)) };
         let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
         if abi::data::is_text(schema_of::<T>()) {
@@ -421,18 +414,6 @@ impl Lookup {
             return T::read(&mut packed.as_slice());
         }
         T::read(&mut &bytes[..])
-    }
-
-    #[cold]
-    fn fill(&self, kind: u32, name: &str, schema: &dyn Fn() -> String) -> *mut u64 {
-        let Some(p) = self.find(kind, name, schema) else { return std::ptr::null_mut() };
-        let s = &self.slots[kind as usize];
-        s.words.store(p.words, Ordering::Relaxed);
-        s.entries.store(p.entries, Ordering::Relaxed);
-        s.data.store(p.data as *mut u8, Ordering::Relaxed);
-        s.stride.store(p.stride, Ordering::Relaxed);
-        s.bits.store(p.bits as *mut u64, Ordering::Release);
-        p.bits as *mut u64
     }
 }
 
@@ -462,36 +443,43 @@ impl<T: Data, K> Component<T, K> {
     pub fn id(&self) -> u32 {
         self.lookup.id(self.name, &T::schema)
     }
-    /// Its value on entry `id` of `kind` (`abi::entry_kind`): a weather's, a game mode's, any
-    /// kind's but word sets and component declarations.
+    /// Its value on entry `id` of a registry, except word sets and component declarations.
     #[inline]
-    pub fn on(&self, kind: u32, id: u32) -> Option<T> {
-        self.lookup.read(kind, id, self.name, &T::schema)
+    pub fn on(&self, registry: RegistryId, id: u32) -> Option<T> {
+        self.lookup.read(registry, id, self.name, &T::schema)
     }
     #[inline]
     pub fn on_block(&self, state: u32) -> Option<T> {
-        self.on(ek::BLOCK, state)
+        crate::registry_id("core:block").and_then(|registry| self.on(registry, state))
     }
     #[inline]
     pub fn on_item(&self, item: u32) -> Option<T> {
-        self.on(ek::ITEM, item)
+        crate::registry_id("core:item").and_then(|registry| self.on(registry, item))
     }
+    /// Its value on an entry in a mod-declared generic registry.
+    pub fn on_registry(&self, registry: abi::RegistryId, entry: u32) -> Option<T> {
+        if component_table().is_none() {
+            return staged_registry_value(registry, entry, self.name);
+        }
+        self.on(registry, entry)
+    }
+
     /// Its value on a record (`Registry::record`).
     #[inline]
     pub fn on_record(&self, record: u32) -> Option<T> {
-        self.on(ek::RECORD, record)
+        crate::registry_id("core:record").and_then(|registry| self.on(registry, record))
     }
     #[inline]
     pub fn on_entity(&self, kind: u32) -> Option<T> {
-        self.on(ek::ENTITY, kind)
+        crate::registry_id("core:entity").and_then(|registry| self.on(registry, kind))
     }
     #[inline]
     pub fn on_biome(&self, biome: u32) -> Option<T> {
-        self.on(ek::BIOME, biome)
+        crate::registry_id("core:biome").and_then(|registry| self.on(registry, biome))
     }
     #[inline]
     pub fn on_dimension(&self, dim: u32) -> Option<T> {
-        self.on(ek::DIMENSION, dim)
+        crate::registry_id("core:dimension").and_then(|registry| self.on(registry, dim))
     }
     /// The stack's own value (damage taken, charge ...), else its item's.
     pub fn on_stack(&self, stack: &ItemStack) -> Option<T> {
@@ -580,7 +568,10 @@ impl<T: Data, K: crate::kind::HasId> Component<T, K> {
     /// Its value on entry `id` of its kind: `FALLS.on_id(w.weather())`.
     #[inline]
     pub fn on_id(&self, id: u32) -> Option<T> {
-        self.on(K::KIND, id)
+        {
+            let registry = crate::registry_id(K::REGISTRY)?;
+            self.on(registry, id)
+        }
     }
 }
 
@@ -596,7 +587,8 @@ impl<K: crate::kind::HasId> Tag<K> {
     /// Entry `id` of its kind has it: `DRY.on_id(w.weather())`.
     #[inline]
     pub fn on_id(&self, id: u32) -> bool {
-        self.on(K::KIND, id)
+        let Some(registry) = crate::registry_id(K::REGISTRY) else { return false };
+        self.on(registry, id)
     }
 }
 
@@ -611,48 +603,56 @@ impl<K> Tag<K> {
     pub fn id(&self) -> u32 {
         self.lookup.id(self.name, &tag_schema)
     }
-    /// Entry `id` of `kind` (`abi::entry_kind`) has it.
+    /// Entry `id` of `kind` (registry) has it.
     #[inline]
-    pub fn on(&self, kind: u32, id: u32) -> bool {
-        self.lookup.has(kind, id, self.name, &tag_schema)
+    pub fn on(&self, registry: RegistryId, id: u32) -> bool {
+        self.lookup.has(registry, id, self.name, &tag_schema)
+    }
+
+    /// Whether an entry in a mod-declared generic registry has this tag.
+    pub fn on_registry(&self, registry: abi::RegistryId, entry: u32) -> bool {
+        if component_table().is_none() {
+            return staged_registry_tag(registry, entry, self.name);
+        }
+        self.lookup.has(registry, entry, self.name, &tag_schema)
     }
     #[inline]
     pub fn on_block(&self, state: u32) -> bool {
-        self.on(ek::BLOCK, state)
+        crate::registry_id("core:block").is_some_and(|registry| self.on(registry, state))
     }
     #[inline]
     pub fn on_item(&self, item: u32) -> bool {
-        self.on(ek::ITEM, item)
+        crate::registry_id("core:item").is_some_and(|registry| self.on(registry, item))
     }
     /// A record (`Registry::record`) has it.
     #[inline]
     pub fn on_record(&self, record: u32) -> bool {
-        self.on(ek::RECORD, record)
+        crate::registry_id("core:record").is_some_and(|registry| self.on(registry, record))
     }
     #[inline]
     pub fn on_entity(&self, kind: u32) -> bool {
-        self.on(ek::ENTITY, kind)
+        crate::registry_id("core:entity").is_some_and(|registry| self.on(registry, kind))
     }
     #[inline]
     pub fn on_biome(&self, biome: u32) -> bool {
-        self.on(ek::BIOME, biome)
+        crate::registry_id("core:biome").is_some_and(|registry| self.on(registry, biome))
     }
     #[inline]
     pub fn on_dimension(&self, dim: u32) -> bool {
-        self.on(ek::DIMENSION, dim)
+        crate::registry_id("core:dimension").is_some_and(|registry| self.on(registry, dim))
     }
 }
 
 /// By name, for rare lookups; a static `Tag` (`Tag::on_block`) is the fast way.
 pub fn block_has_tag(state: u32, tag: &str) -> bool {
     let id = unsafe { (host().find_component)(Str::new(tag), Str::new("")) };
-    table_has(ek::BLOCK, state, id)
+    crate::registry_id("core:block").is_some_and(|registry| table_has(registry, state, id))
 }
 
 /// By name, for rare lookups; a static `Tag` (`Tag::on_item`) is the fast way.
 pub fn item_has_tag(item: u32, tag: &str) -> bool {
     let id = unsafe { (host().find_component)(Str::new(tag), Str::new("")) };
-    table_has(ek::ITEM, item, id)
+    crate::registry_id("core:item").is_some_and(|registry| table_has(registry, item, id))
 }
 
 pub(crate) fn value_bytes<T: Copy>(v: &T) -> Vec<u8> {

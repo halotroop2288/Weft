@@ -2,9 +2,9 @@
 //! (batched, delivered at the end of the tick) and chains of steps (`crate::steps`), which are
 //! also how questions are answered and how attributes come about.
 
+use crate::entries::kind as ek;
 use std::cell::RefCell;
 use std::sync::atomic::Ordering;
-use weft_abi::entry_kind as ek;
 
 use weft_abi as abi;
 
