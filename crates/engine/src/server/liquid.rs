@@ -393,6 +393,87 @@ impl Dim {
         }
     }
 
+    /// Consume one unit of a falling liquid when its configured reaction turns the
+    /// touched block into a result state. None means this state/result is not a falls-into
+    /// reaction; Some(false) means the reaction source was unavailable.
+    pub(super) fn consume_falling_reaction(
+        &mut self,
+        space_id: u64,
+        c: &'static Content,
+        p: IVec3,
+        touching_state: u32,
+        result: u32,
+    ) -> Option<bool> {
+        for (id, liquid) in c.liquids.iter().enumerate() {
+            if !liquid.falls_into.iter().any(|&(matcher, into)| {
+                into == result && c.matchers.has(matcher, touching_state)
+            }) {
+                continue;
+            }
+
+            let down = if liquid.rises { IVec3::Y } else { IVec3::NEG_Y };
+            let source_pos = p - down;
+            let Some(source) = self.fluid(space_id, c, source_pos) else {
+                return Some(false);
+            };
+            if source.id as usize != id {
+                continue;
+            }
+            if !self.replace_part(space_id, c, p, touching_state, result) {
+                return Some(false);
+            }
+            if !self.set_liquid_level(
+                space_id,
+                c,
+                source_pos,
+                source.id,
+                source.amount.saturating_sub(1),
+            ) {
+                self.replace_part(space_id, c, p, result, touching_state);
+                return Some(false);
+            }
+            return Some(true);
+        }
+
+        // Horizontal/side-contact reactions consume one unit of the liquid being touched.
+        // The reacting liquid at p is transformed; the adjacent liquid supplies the cost.
+        for liquid in &c.liquids {
+            for &(matcher, into) in &liquid.reacts_with {
+                if into != result {
+                    continue;
+                }
+                for d in DIRS {
+                    let water_pos = p + d;
+                    let Some(water_state) = self.space(space_id).liquid(c, water_pos) else {
+                        continue;
+                    };
+                    if !c.matchers.has(matcher, water_state) {
+                        continue;
+                    }
+                    let Some(water) = self.fluid(space_id, c, water_pos) else {
+                        continue;
+                    };
+                    if !self.replace_part(space_id, c, p, touching_state, result) {
+                        return Some(false);
+                    }
+                    if !self.set_liquid_level(
+                        space_id,
+                        c,
+                        water_pos,
+                        water.id,
+                        water.amount.saturating_sub(1),
+                    ) {
+                        self.replace_part(space_id, c, p, result, touching_state);
+                        return Some(false);
+                    }
+                    return Some(true);
+                }
+                return Some(false);
+            }
+        }
+        None
+    }
+
     /// A neighbor of a liquid changed: react with what touches it, else flow after the delay.
     pub(super) fn liquid_neighbor(&mut self, space_id: u64, c: &'static Content, p: IVec3, state: u32) {
         let Some(f) = decode(c, state) else { return };

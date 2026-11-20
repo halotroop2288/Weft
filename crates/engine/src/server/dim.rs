@@ -3346,6 +3346,13 @@ impl Dim {
                 && r.cond
                     .is_none_or(|w| crate::conditions::on_server(self, space_id, c, w, &ask))
             {
+                if let Then::Become(into) = r.then {
+                    match self.consume_falling_reaction(space_id, c, p, part, into) {
+                        Some(true) => return true,
+                        Some(false) => continue,
+                        None => {}
+                    }
+                }
                 self.act(space_id, c, p, part, r.then);
                 return true;
             }

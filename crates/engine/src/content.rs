@@ -706,6 +706,12 @@ pub struct LiquidDef {
     pub rises: bool,
     pub temperature: u32,
     pub environment: Vec<abi::environment::EnvironmentLayer>,
+    /// Reactions which turn a block touched by this falling liquid into a result state.
+    /// Each entry is (matcher for the touched block, result state).
+    pub falls_into: Vec<(u32, u32)>,
+    /// Reactions that turn this liquid into a result when it touches a matching block.
+    /// Each entry is (matcher for the touched block, result state).
+    pub reacts_with: Vec<(u32, u32)>,
 }
 
 impl LiquidDef {
@@ -3973,11 +3979,13 @@ fn freeze_liquids(
                 rises: e.or(l::DENSITY, 1000) < 0,
                 temperature: e.or(l::HEAT, 300),
                 environment,
+                falls_into: Vec::new(),
+                reacts_with: Vec::new(),
             })
         },
     );
     // Liquids whose block is missing are errors, so ids stay those of the names.
-    let liquids: Vec<LiquidDef> = liquids.into_iter().flatten().collect();
+    let mut liquids: Vec<LiquidDef> = liquids.into_iter().flatten().collect();
     for (id, liquid) in liquids.iter().enumerate() {
         // States 0..8 are levels (0 the source), 8..16 falling: full height.
         for s in 0..16 {
@@ -4023,7 +4031,14 @@ fn freeze_liquids(
     for (liquid, touching, liquid_text, touching_text, source, flowing, falls_into) in reactions.into_iter().flatten() {
         // The side it comes from, against the way it flows.
         let from = |rises: bool| if rises { "down" } else { "up" };
-        let falling = liquids.iter().find(|l| matchers.has(liquid, l.first_state));
+        let falling_id = liquids.iter().position(|l| matchers.has(liquid, l.first_state));
+        if let (Some(into), Some(id)) = (falls_into, falling_id) {
+            liquids[id].falls_into.push((touching, into));
+        }
+        if let (Some(into), Some(id)) = (flowing, falling_id) {
+            liquids[id].reacts_with.push((touching, into));
+        }
+        let falling = falling_id.map(|id| &liquids[id]);
         for (i, s) in states.iter_mut().enumerate() {
             let Some(l) = s.liquid.map(|l| &liquids[l as usize]) else { continue };
             let made = if i as u32 == l.first_state { source } else { flowing };
