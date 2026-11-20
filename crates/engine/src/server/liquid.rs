@@ -18,21 +18,141 @@ const HORIZONTAL: [IVec3; 4] = [IVec3::new(0, 0, -1), IVec3::new(1, 0, 0), IVec3
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Fluid {
     id: u16,
-    /// 1..8, 8 for sources and falling liquid.
+    /// 1..8 units of liquid in this cell.
     amount: u32,
     source: bool,
-    falling: bool,
 }
 
 fn decode(c: &Content, state: u32) -> Option<Fluid> {
     let id = c.states[state as usize].liquid?;
     let i = state - c.liquids[id as usize].first_state;
-    let (source, falling) = (i == 0, i >= 8);
-    Some(Fluid { id, amount: if source || falling { 8 } else { 8 - i }, source, falling })
+    let source = i == 0;
+    Some(Fluid { id, amount: if source || !has_liquid_capacity(i) { 8 } else { 8 - i }, source })
 }
 
-fn encode(def: &LiquidDef, amount: u32, falling: bool) -> u32 {
-    if falling { def.first_state + 8 } else { def.first_state + 8 - amount.clamp(1, 8) }
+fn encode(def: &LiquidDef, amount: u32) -> u32 {
+    def.first_state + 8 - amount.clamp(1, 8)
+}
+
+/// Add incoming volume to a cell, returning its capped amount and the overflow.
+fn has_liquid_capacity(amount: u32) -> bool {
+    amount < 8
+}
+
+/// Add incoming volume to a cell, returning its capped amount and the overflow.
+fn split_volume(existing: u32, incoming: u32) -> (u32, u32) {
+    let total = existing + incoming;
+    (total.min(8), total.saturating_sub(8))
+}
+
+/// Apply Dihydrogen Monoxide's one-unit horizontal equalization in the given neighbor order.
+/// A negative neighbor level marks a cell which cannot receive this liquid.
+fn equalize_levels(center: &mut u32, levels: &mut [i32; 4], order: [usize; 4], floor: u32) {
+    loop {
+        let mut moved = false;
+        for i in order {
+            if levels[i] >= 0 && *center > floor && *center >= levels[i] as u32 + 2 {
+                *center -= 1;
+                levels[i] += 1;
+                moved = true;
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{equalize_levels, has_liquid_capacity, split_volume};
+
+    #[test]
+    fn gravity_caps_destination_and_keeps_overflow() {
+        assert_eq!(split_volume(0, 8), (8, 0));
+        assert_eq!(split_volume(3, 8), (8, 3));
+        assert_eq!(split_volume(7, 1), (8, 0));
+    }
+
+    #[test]
+    fn horizontal_equalization_conserves_volume() {
+        let mut center = 8;
+        let mut levels = [0, 0, 0, 0];
+        equalize_levels(&mut center, &mut levels, [0, 1, 2, 3], 0);
+        assert_eq!(center + levels.iter().map(|&v| v as u32).sum::<u32>(), 8);
+        assert_eq!(center, 1);
+        assert_eq!(levels, [2, 2, 2, 1]);
+    }
+
+    #[test]
+    fn equalization_ignores_unavailable_neighbors() {
+        let mut center = 5;
+        let mut levels = [-1, 0, -1, 1];
+        equalize_levels(&mut center, &mut levels, [0, 1, 2, 3]);
+        assert_eq!(center + levels.iter().filter(|&&v| v >= 0).map(|&v| v as u32).sum::<u32>(), 6);
+        assert_eq!(levels, [-1, 2, -1, 2]);
+        assert_eq!(center, 2);
+    }
+
+    #[test]
+    fn one_open_neighbor_can_receive_the_whole_cell() {
+        let mut center = 8;
+        let mut levels = [-1, 0, -1, -1];
+        equalize_levels(&mut center, &mut levels, [0, 1, 2, 3]);
+        assert_eq!(center, 1);
+        assert_eq!(levels, [-1, 7, -1, -1]);
+    }
+
+    #[test]
+    fn horizontal_order_changes_ties_without_changing_total_volume() {
+        let mut north_first = 8;
+        let mut a = [0, 0, -1, -1];
+        equalize_levels(&mut north_first, &mut a, [0, 1, 2, 3], 0);
+
+        let mut east_first = 8;
+        let mut b = [0, 0, -1, -1];
+        equalize_levels(&mut east_first, &mut b, [1, 0, 2, 3], 0);
+
+        assert_eq!(north_first + a.iter().filter(|&&v| v >= 0).map(|&v| v as u32).sum::<u32>(), 8);
+        assert_eq!(east_first + b.iter().filter(|&&v| v >= 0).map(|&v| v as u32).sum::<u32>(), 8);
+        assert_eq!(north_first, 3);
+        assert_eq!(east_first, 3);
+        assert_eq!(a[0], 3);
+        assert_eq!(a[1], 2);
+        assert_eq!(b[0], 2);
+        assert_eq!(b[1], 3);
+    }
+
+    #[test]
+    fn equalization_preserves_the_configured_drop_off() {
+        let mut center = 8;
+        let mut levels = [0, 0, 0, 0];
+        equalize_levels(&mut center, &mut levels, [0, 1, 2, 3], 1);
+        assert_eq!(center, 1);
+        assert_eq!(center + levels.iter().map(|&v| v as u32).sum::<u32>(), 8);
+    }
+
+    #[test]
+    fn full_liquid_cells_are_solid_but_partial_cells_can_receive() {
+        assert!(!has_liquid_capacity(8));
+        assert!(!has_liquid_capacity(9));
+        assert!(has_liquid_capacity(7));
+        assert!(has_liquid_capacity(1));
+    }
+
+    #[test]
+    fn shuffled_horizontal_order_is_a_permutation() {
+        let mut order = [0, 1, 2, 3];
+        let mut seed = 0x1234_5678_9ABC_DEF0u64;
+        for i in (1..order.len()).rev() {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            order.swap(i, seed as usize % (i + 1));
+        }
+        order.sort_unstable();
+        assert_eq!(order, [0, 1, 2, 3]);
+    }
 }
 
 impl Dim {
@@ -40,15 +160,7 @@ impl Dim {
         self.space(space_id).liquid(c, p).and_then(|s| decode(c, s))
     }
 
-    /// The liquid at `p` reaching over to the cell in direction `d` of it: not past a solid part
-    /// in between, as a bottom slab is under the water in it.
-    fn fluid_towards(&self, space_id: u64, c: &Content, p: IVec3, d: IVec3) -> Option<Fluid> {
-        self.fluid(space_id, c, p)
-            .filter(|_| !self.sealed(space_id, c, p, d))
-    }
-
-    /// Whether what shares the cell at `p` with a liquid closes its side towards `d`: what its
-    /// shape covers whole there (a stair's back), or what its block says (`liquid_walls`).
+    /// Whether what shares the cell at `p` with a liquid closes its side towards `d`.
     fn sealed(&self, space_id: u64, c: &Content, p: IVec3, d: IVec3) -> bool {
         let space = self.space(space_id);
         let Some(main) = space.get(p) else { return false };
@@ -73,70 +185,34 @@ impl Dim {
         })
     }
 
-    fn solid(&self, space_id: u64, c: &Content, p: IVec3) -> bool {
-        self.get(space_id, p).is_none_or(|main| {
-            self.space(space_id)
-                .layout(p)
-                .parts(main)
-                .any(|part| c.solid(part.state))
-        })
+    /// Blocks which explicitly share their cell with a liquid are fluid containers, not flow
+    /// destinations. This mirrors Minecraft's FluidFillable exclusion.
+    fn is_fluid_container(&self, space_id: u64, c: &Content, p: IVec3, l: u16) -> bool {
+        let source = c.liquids[l as usize].first_state;
+        self.parts(space_id, p)
+            .into_iter()
+            .any(|s| c.states[s as usize].liquid.is_none() && c.may_share(s, source))
     }
 
-    /// What liquid `l` would make of `p` from its neighbors: a state, or `None` for nothing.
-    fn new_liquid(&self, space_id: u64, c: &Content, p: IVec3, l: u16, down: IVec3) -> Option<u32> {
-        let def = &c.liquids[l as usize];
-        let (mut max, mut sources) = (0, 0);
-        for d in HORIZONTAL {
-            if let Some(f) = self
-                .fluid_towards(space_id, c, p + d, -d)
-                .filter(|f| f.id == l)
-            {
-                sources += f.source as u32;
-                max = max.max(f.amount);
-            }
-        }
-        if sources >= def.renewable {
-            let under = self.fluid(space_id, c, p + down);
-            if self.solid(space_id, c, p + down) || under.is_some_and(|f| f.id == l && f.source) {
-                return Some(def.first_state);
-            }
-        }
-        if self
-            .fluid_towards(space_id, c, p - down, down)
-            .is_some_and(|f| f.id == l)
-        {
-            return Some(encode(def, 8, true));
-        }
-        let k = max as i32 - def.drop_off as i32;
-        (k > 0).then(|| encode(def, k as u32, false))
-    }
-
-    fn is_hole(&self, space_id: u64, c: &Content, below: IVec3, l: u16) -> bool {
-        self.fluid(space_id, c, below).is_some_and(|f| f.id == l) || self.has_room(space_id, c, below)
-    }
-
-    fn passes(&self, space_id: u64, c: &Content, p: IVec3, l: u16) -> bool {
-        !self
-            .fluid(space_id, c, p)
-            .is_some_and(|f| f.id == l && f.source)
-            && self.has_room(space_id, c, p)
-    }
-
-    /// Whether a liquid may flow into `p`: into empty room (what it meets there reacts by its
-    /// rules).
-    fn can_spread_to(&self, space_id: u64, c: &Content, p: IVec3) -> bool {
+    /// Whether a cell can receive more of this liquid.
+    /// A full cell, a different liquid, an unloaded cell, and a fluid container are not destinations.
+    fn can_flow_into(&self, space_id: u64, c: &Content, p: IVec3, l: u16) -> bool {
         if self
             .space(space_id)
             .bounds
             .is_some_and(|(lo, hi)| p.cmplt(lo).any() || p.cmpgt(hi).any())
+            || self.is_fluid_container(space_id, c, p, l)
         {
             return false;
         }
-        self.fluid(space_id, c, p).is_none() && self.has_room(space_id, c, p)
+        if let Some(f) = self.fluid(space_id, c, p) {
+            return f.id == l && has_liquid_capacity(f.amount);
+        }
+        self.has_room(space_id, c, p)
     }
 
     fn spread_to(&mut self, space_id: u64, c: &'static Content, p: IVec3, state: u32) -> Option<()> {
-        if self.fluid(space_id, c, p).is_some() {
+        if self.fluid(space_id, c, p).is_some() || self.is_fluid_container(space_id, c, p, c.states[state as usize].liquid?) {
             return None;
         }
         let was = self.parts(space_id, p);
@@ -148,96 +224,172 @@ impl Dim {
         Some(())
     }
 
-    fn slope_distance(&self, space_id: u64, c: &Content, p: IVec3, depth: u32, from: IVec3, l: u16, down: IVec3) -> u32 {
-        let mut min = 1000;
+    /// Write an amount into an empty cell or update/remove this liquid's existing part.
+    fn set_liquid_level(&mut self, space_id: u64, c: &'static Content, p: IVec3, l: u16, amount: u32) -> bool {
+        let old = self.space(space_id).liquid(c, p);
+        if let Some(old) = old {
+            if c.states[old as usize].liquid != Some(l) {
+                return false;
+            }
+            let next = if amount == 0 { AIR } else { encode(&c.liquids[l as usize], amount) };
+            return self.replace_part(space_id, c, p, old, next);
+        }
+        if amount == 0 {
+            return true;
+        }
+        self.spread_to(space_id, c, p, encode(&c.liquids[l as usize], amount)).is_some()
+    }
+
+    /// A full liquid cell is solid for slope searches.
+    /// A partially filled cell can still receive volume and therefore remains a valid passage.
+    fn is_hole(&self, space_id: u64, c: &Content, p: IVec3, l: u16, down: IVec3) -> bool {
+        !self.sealed(space_id, c, p, down) && self.can_flow_into(space_id, c, p, l)
+    }
+
+    /// Shortest horizontal distance from this cell to a cell with room in the gravity direction.
+    /// The previous direction prevents immediately walking back along the edge we arrived through.
+    fn slope_distance(
+        &self,
+        space_id: u64,
+        c: &Content,
+        p: IVec3,
+        depth: u32,
+        from: IVec3,
+        l: u16,
+        down: IVec3,
+    ) -> u32 {
+        let mut min = u32::MAX;
         for d in HORIZONTAL {
             if d == from {
                 continue;
             }
-            let n = p + d;
-            if self.passes(space_id, c, n, l) {
-                if self.is_hole(space_id, c, n + down, l) {
-                    return depth;
-                }
-                if depth < c.liquids[l as usize].slope_find {
-                    min = min.min(self.slope_distance(space_id, c, n, depth + 1, -d, l, down));
-                }
+            let next = p + d;
+            if !self.can_flow_into(space_id, c, next, l) || self.sealed(space_id, c, p, d) {
+                continue;
+            }
+            if self.is_hole(space_id, c, next + down, l, down) {
+                return depth;
+            }
+            if depth < c.liquids[l as usize].slope_find {
+                min = min.min(self.slope_distance(space_id, c, next, depth + 1, -d, l, down));
             }
         }
         min
     }
 
-    /// Directions to spread in: the ones nearest to a way down, each with the state it gets.
-    fn spread_dirs(&self, space_id: u64, c: &Content, p: IVec3, l: u16, down: IVec3) -> Vec<(IVec3, u32)> {
-        let mut min = 1000;
-        let mut out = Vec::new();
-        for d in HORIZONTAL {
-            let n = p + d;
-            if !self.passes(space_id, c, n, l) {
+    /// Keep only directions which lead to the nearest drop-off. If no drop-off is reachable
+    /// within slope_find, return all open directions so the surface can level out.
+    fn slope_directions(&self, space_id: u64, c: &Content, p: IVec3, l: u16, down: IVec3) -> [bool; 4] {
+        let mut distances = [u32::MAX; 4];
+        let mut open = [false; 4];
+        let mut nearest = u32::MAX;
+        for (i, d) in HORIZONTAL.into_iter().enumerate() {
+            let next = p + d;
+            if self.sealed(space_id, c, p, d) || !self.can_flow_into(space_id, c, next, l) {
                 continue;
             }
-            let Some(state) = self.new_liquid(space_id, c, n, l, down) else { continue };
-            let slope = if self.is_hole(space_id, c, n + down, l) { 0 } else { self.slope_distance(space_id, c, n, 1, -d, l, down) };
-            if slope < min {
-                out.clear();
-            }
-            if slope <= min {
-                out.push((d, state));
-                min = slope;
-            }
+            open[i] = true;
+            let distance = if self.is_hole(space_id, c, next + down, l, down) {
+                0
+            } else {
+                self.slope_distance(space_id, c, next, 1, -d, l, down)
+            };
+            distances[i] = distance;
+            nearest = nearest.min(distance);
         }
-        out
+
+        // MAX means no reachable drop-off, not a closed direction. Keep every open
+        // neighbor so a trapped full cell can level out.
+        if nearest == u32::MAX {
+            return open;
+        }
+        distances.map(|distance| distance == nearest)
     }
 
-    fn spread_sides(&mut self, space_id: u64, c: &'static Content, p: IVec3, f: Fluid, down: IVec3) {
-        let def = &c.liquids[f.id as usize];
-        let amount = if f.falling { 7 } else { f.amount as i32 - def.drop_off as i32 };
-        if amount <= 0 {
-            return;
+    /// A deterministic shuffle gives each tick an unbiased horizontal order without making
+    /// simulation results depend on thread scheduling or a global random-number generator.
+    fn shuffled_horizontal(&self, p: IVec3) -> [usize; 4] {
+        let mut order = [0, 1, 2, 3];
+        let mut seed = self.time
+            ^ (p.x as u32 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ (p.y as u32 as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9)
+            ^ (p.z as u32 as u64).wrapping_mul(0x94D0_49BB_1331_11EB);
+        if seed == 0 {
+            seed = 0xA076_1D64_78BD_642F;
         }
-        for (d, state) in self.spread_dirs(space_id, c, p, f.id, down) {
-            if !self.sealed(space_id, c, p, d) && self.can_spread_to(space_id, c, p + d) {
-                self.spread_to(space_id, c, p + d, state);
-            }
+        for i in (1..order.len()).rev() {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            order.swap(i, seed as usize % (i + 1));
         }
+        order
     }
 
     /// The scheduled tick of a liquid block.
     pub(super) fn liquid_tick(&mut self, space_id: u64, c: &'static Content, p: IVec3, state: u32) {
-        let Some(mut f) = decode(c, state) else { return };
-        let def = &c.liquids[f.id as usize];
-        let down = if def.rises { IVec3::Y } else { IVec3::NEG_Y };
-        if !f.source {
-            match self.new_liquid(space_id, c, p, f.id, down) {
-                None => {
-                    self.replace_part(space_id, c, p, state, AIR);
-                    return;
-                }
-                Some(s) if s != state => {
-                    self.replace_part(space_id, c, p, state, s);
-                    f = decode(c, s).unwrap_or(f);
-                }
-                _ => {}
+        let Some(f) = decode(c, state) else { return };
+        if self.is_fluid_container(space_id, c, p, f.id) {
+            return;
+        }
+
+        let down = if c.liquids[f.id as usize].rises { IVec3::Y } else { IVec3::NEG_Y };
+        let below = p + down;
+
+        // Gravity transfers the entire cell's volume into the next cell. If that cell overflows,
+        // the excess remains in the cell the liquid came from.
+        if !self.sealed(space_id, c, p, down) && self.can_flow_into(space_id, c, below, f.id) {
+            let existing = self.fluid(space_id, c, below).map_or(0, |n| n.amount);
+            let (next_below, overflow) = split_volume(existing, f.amount);
+            if self.set_liquid_level(space_id, c, below, f.id, next_below)
+                && !self.set_liquid_level(space_id, c, p, f.id, overflow)
+            {
+                // A failed source update must not leave the destination with duplicated volume.
+                self.set_liquid_level(space_id, c, below, f.id, existing);
+            }
+            return;
+        }
+
+        // Prefer the shortest route to a drop-off. If no route exists within slope_find,
+        // equalize with every open horizontal neighbor to produce a level surface.
+        let directions = self.slope_directions(space_id, c, p, f.id, down);
+        let mut levels = [-1; 4];
+        for (i, d) in HORIZONTAL.into_iter().enumerate() {
+            if directions[i] {
+                levels[i] = self.fluid(space_id, c, p + d).map_or(0, |n| n.amount) as i32;
             }
         }
-        let below = p + down;
-        if !self.sealed(space_id, c, p, down) && self.can_spread_to(space_id, c, below) {
-            let state = self
-                .new_liquid(space_id, c, below, f.id, down)
-                .unwrap_or(encode(def, 8, true));
-            self.spread_to(space_id, c, below, state);
-            let sources = HORIZONTAL
-                .iter()
-                .filter(|&&d| {
-                    self.fluid(space_id, c, p + d)
-                        .is_some_and(|n| n.id == f.id && n.source)
-                })
-                .count();
-            if sources >= 3 {
-                self.spread_sides(space_id, c, p, f, down);
+        let before = levels;
+        let mut desired_center = f.amount;
+        equalize_levels(
+            &mut desired_center,
+            &mut levels,
+            self.shuffled_horizontal(p),
+            0,
+        );
+
+        let mut moved = Vec::new();
+        let mut center = f.amount;
+        let mut all_neighbors_written = true;
+        for (i, d) in HORIZONTAL.into_iter().enumerate() {
+            if levels[i] >= 0 && levels[i] != before[i] {
+                let amount = (levels[i] - before[i]) as u32;
+                if self.set_liquid_level(space_id, c, p + d, f.id, levels[i] as u32) {
+                    center -= amount;
+                    moved.push((p + d, before[i] as u32));
+                } else {
+                    all_neighbors_written = false;
+                }
             }
-        } else if f.source || !self.is_hole(space_id, c, below, f.id) {
-            self.spread_sides(space_id, c, p, f, down);
+        }
+        if all_neighbors_written {
+            center = desired_center;
+        }
+        if center != f.amount && !self.set_liquid_level(space_id, c, p, f.id, center) {
+            // Roll back successful neighbor writes if the source could not be updated.
+            for (at, amount) in moved {
+                self.set_liquid_level(space_id, c, at, f.id, amount);
+            }
         }
     }
 
