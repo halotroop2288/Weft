@@ -3810,6 +3810,10 @@ impl LiquidBuilder<'_> {
     pub fn slope_find(self, n: u32) -> Self {
         self.set(&crate::comps::liquid::SLOPE_FIND, n)
     }
+    /// Density relative to water (1000). Lower-density liquids float above higher-density liquids.
+    pub fn density(self, density: i32) -> Self {
+        self.set(&crate::comps::liquid::DENSITY, density)
+    }
     /// Rises instead of falling.
     pub fn flows_up(self) -> Self {
         self.set(&crate::comps::liquid::DENSITY, -1000)

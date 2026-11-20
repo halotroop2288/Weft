@@ -43,22 +43,6 @@ pub struct Mesh {
 /// in its own.
 pub const UPPER: usize = 3;
 
-impl Neighborhood {
-    /// The state a cell counts as to a liquid: the liquid in it, if any.
-    fn liquid_view(&self, c: &Content, i: usize) -> u32 {
-        if !self.extras.is_empty()
-            && let Some(parts) = self.extras.get(&i)
-            && let Some(&l) = parts
-                .extras
-                .iter()
-                .find(|&&s| c.states[s as usize].liquid.is_some())
-        {
-            return l;
-        }
-        self.states[i]
-    }
-}
-
 impl Mesh {
     pub fn is_empty(&self) -> bool {
         self.faces.iter().all(Vec::is_empty) && self.quads.iter().all(Vec::is_empty)
@@ -546,26 +530,80 @@ fn quad(corners: [[f32; 3]; 4], uv: [f32; 4], texture: u32, biome: u32, tint: u8
     ]
 }
 
+fn liquids_at(c: &Content, n: &Neighborhood, i: usize) -> Vec<(u32, u16, u32)> {
+    let mut fluids: Vec<_> = std::iter::once(n.states[i])
+        .chain(
+            n.extras
+                .get(&i)
+                .into_iter()
+                .flat_map(|layout| layout.extras.iter().copied()),
+        )
+        .filter_map(|state| {
+            let id = c.states[state as usize].liquid?;
+            let offset = state - c.liquids[id as usize].first_state;
+            let amount = if offset == 0 || offset >= 8 { 8 } else { 8 - offset };
+            Some((state, id, amount))
+        })
+        .collect();
+    // Resident layout order is not a rendering contract. Re-establish the
+    // same upper-to-lower order used by the simulation.
+    fluids.sort_by_key(|&(_, id, amount)| (c.liquids[id as usize].density, amount, id));
+    fluids
+}
+
+/// Each resident liquid's vertical interval relative to the cell's bottom.
+/// The bottommost resident continues down to the surface of liquid in the
+/// cell below, matching the geometry used for vertical connections.
+fn liquid_bounds(c: &Content, n: &Neighborhood, x: i32, y: i32, z: i32) -> Vec<(u32, u16, f32, f32)> {
+    let fluids = liquids_at(c, n, pidx(x, y, z));
+    let below_fluids = liquids_at(c, n, pidx(x, y - 1, z));
+    let below_surface = below_fluids
+        .iter()
+        .map(|(_, _, amount)| *amount)
+        .sum::<u32>() as f32
+        / 9.0
+        - 1.0;
+    let mut bounds = Vec::with_capacity(fluids.len());
+    for (index, &(state, id, amount)) in fluids.iter().enumerate() {
+        let lower: u32 = fluids.iter().skip(index + 1).map(|(_, _, amount)| *amount).sum();
+        let bottom = if index + 1 == fluids.len() && !below_fluids.is_empty() {
+            below_surface
+        } else {
+            lower as f32 / 9.0
+        };
+        bounds.push((state, id, bottom, (lower + amount) as f32 / 9.0));
+    }
+    bounds
+}
+
 #[allow(clippy::too_many_arguments)]
 fn liquid(c: &Content, n: &Neighborhood, ctm: &super::ctm::Ctm, mesh: &mut Mesh, x: i32, y: i32, z: i32, s: u32, biome: u32) {
     let i = pidx(x, y, z);
     let info = &c.states[s as usize];
-    let block = info.block;
-    let same = |xx: i32, yy: i32, zz: i32| c.states[n.liquid_view(c, pidx(xx, yy, zz)) as usize].block == block;
+    let Some(liquid_id) = info.liquid else { return };
+    let fluids = liquids_at(c, n, i);
+    let Some(layer_index) = fluids.iter().position(|&(state, _, _)| state == s) else { return };
+    let bounds = liquid_bounds(c, n, x, y, z);
+    let (_, _, bottom, top) = bounds[layer_index];
+    let top_layer = layer_index == 0;
+    let bottom_layer = layer_index + 1 == fluids.len();
+    let below_cell = pidx(x, y - 1, z);
+
+    // A neighboring column only contributes to this liquid's top surface if
+    // this liquid is its uppermost constituent. Likewise, vertical continuity
+    // exists only when it is the bottommost constituent above.
     let height = |xx: i32, zz: i32| -> Option<f32> {
-        if !same(xx, y, zz) {
-            return None;
+        let neighbor = liquid_bounds(c, n, xx, y, zz);
+        let &(_, _, _, top) = neighbor.iter().find(|&&(_, id, _, _)| id == liquid_id)?;
+        let above = liquids_at(c, n, pidx(xx, y + 1, zz));
+        if above.last().is_some_and(|&(_, above_id, _)| above_id == liquid_id) {
+            Some(1.0)
+        } else {
+            Some(top)
         }
-        if same(xx, y + 1, zz) {
-            return Some(1.0);
-        }
-        let lvl = c.states[n.liquid_view(c, pidx(xx, y, zz)) as usize]
-            .level
-            .min(7) as f32;
-        Some((8.0 - lvl) / 9.0)
     };
     let corner_h = |cx: i32, cz: i32| -> f32 {
-        // Corner (cx, cz) in {0,1}: average over the up to four columns sharing it.
+        // Average the top height of this constituent over columns sharing the corner.
         let mut sum = 0.0;
         let mut cnt = 0.0;
         for (ox, oz) in [(cx - 1, cz - 1), (cx, cz - 1), (cx - 1, cz), (cx, cz)] {
@@ -577,7 +615,7 @@ fn liquid(c: &Content, n: &Neighborhood, ctm: &super::ctm::Ctm, mesh: &mut Mesh,
                 cnt += 1.0;
             }
         }
-        sum / cnt
+        if cnt == 0.0 { top } else { sum / cnt }
     };
     let h = [corner_h(0, 0), corner_h(1, 0), corner_h(1, 1), corner_h(0, 1)];
     let hat = |cx: i32, cz: i32| match (cx, cz) {
@@ -590,20 +628,24 @@ fn liquid(c: &Content, n: &Neighborhood, ctm: &super::ctm::Ctm, mesh: &mut Mesh,
     let t = info.textures[3];
     let ts = info.textures[0];
     let (fx, fy, fz) = (x as f32, y as f32, z as f32);
-    let layer = info.layer as usize;
+    let render_layer = info.layer as usize;
     let tint = info.tint | crate::gpu_layout::quad::LIQUID as u8;
-    // In a block (waterlogged): its sides it covers whole stand where the liquid's would, which
-    // would fight them.
+    // Non-liquid residents can seal faces of a liquid layer.
     let parts = std::iter::once(n.states[i]).chain(
         n.extras
             .get(&i)
             .into_iter()
-            .flat_map(|l| l.extras.iter().copied()),
+            .flat_map(|layout| layout.extras.iter().copied()),
     );
     let walls = parts
-        .filter(|&p| c.states[p as usize].liquid.is_none())
-        .fold(0u8, |m, p| m | c.liquid_walls[p as usize]);
-    if !same(x, y + 1, z) && walls & 1 << 3 == 0 {
+        .filter(|&part| c.states[part as usize].liquid.is_none())
+        .fold(0u8, |mask, part| mask | c.liquid_walls[part as usize]);
+
+    let above = liquids_at(c, n, pidx(x, y + 1, z));
+    let continues_above = above.last().is_some_and(|&(_, id, _)| id == liquid_id);
+
+    // Only the uppermost constituent has an exposed top surface.
+    if !continues_above && walls & 1 << 3 == 0 {
         let corners = [
             [fx, fy + hat(0, 1), fz + 1.0],
             [fx + 1.0, fy + hat(1, 1), fz + 1.0],
@@ -611,30 +653,69 @@ fn liquid(c: &Content, n: &Neighborhood, ctm: &super::ctm::Ctm, mesh: &mut Mesh,
             [fx, fy + hat(0, 0), fz],
         ];
         let lu = light16(n.light[pidx(x, y + 1, z)]).max(l);
-        mesh.quads[layer].push(quad(corners, WHOLE, t, biome, tint, [lu; 4]));
+        mesh.quads[render_layer].push(quad(corners, WHOLE, t, biome, tint, [lu; 4]));
         let back = [corners[1], corners[0], corners[3], corners[2]];
-        mesh.quads[layer].push(quad(back, WHOLE, t, biome, tint, [lu; 4]));
+        mesh.quads[render_layer].push(quad(back, WHOLE, t, biome, tint, [lu; 4]));
     }
+    // Remove only the vertical intervals occupied by the same liquid in
+    // the neighboring cell. A different layer of that liquid must not hide
+    // this constituent's exposed side.
     for dir in [0usize, 1, 4, 5] {
         let [dx, _, dz] = NORMALS[dir];
-        if same(x + dx, y, z + dz) || walls & 1 << dir != 0 {
+        if walls & 1 << dir != 0 {
             continue;
         }
         let ni = pidx(x + dx, y, z + dz);
         if ctm.hides(c.states[n.states[ni] as usize].flags, n.states[ni]) {
             continue;
         }
-        let k = CORNERS[dir];
-        let corners = k.map(|p| {
-            let top = if p[1] == 1 { hat(p[0], p[2]) } else { 0.0 };
-            [fx + p[0] as f32, fy + top, fz + p[2] as f32]
-        });
-        let nl = light16(n.light[ni]);
-        mesh.quads[layer].push(quad(corners, WHOLE, ts, biome, tint, [nl; 4]));
+        let neighbor = liquid_bounds(c, n, x + dx, y, z + dz);
+        let mut visible = vec![(bottom, top)];
+        for &(_, _, neighbor_bottom, neighbor_top) in
+            neighbor.iter().filter(|&&(_, id, _, _)| id == liquid_id)
+        {
+            let mut next = Vec::new();
+            for (lo, hi) in visible {
+                if neighbor_top <= lo || neighbor_bottom >= hi {
+                    next.push((lo, hi));
+                    continue;
+                }
+                if neighbor_bottom > lo {
+                    next.push((lo, neighbor_bottom));
+                }
+                if neighbor_top < hi {
+                    next.push((neighbor_top, hi));
+                }
+            }
+            visible = next;
+        }
+        for (lo, hi) in visible {
+            if hi <= lo {
+                continue;
+            }
+            let corners = CORNERS[dir].map(|p| {
+                let yy = if p[1] == 1 {
+                    if (hi - top).abs() < f32::EPSILON {
+                        if top_layer { hat(p[0], p[2]) } else { top }
+                    } else {
+                        hi
+                    }
+                } else {
+                    lo
+                };
+                [fx + p[0] as f32, fy + yy, fz + p[2] as f32]
+            });
+            let nl = light16(n.light[ni]);
+            mesh.quads[render_layer].push(quad(corners, WHOLE, ts, biome, tint, [nl; 4]));
+        }
     }
-    let below = pidx(x, y - 1, z);
-    if !same(x, y - 1, z) && walls & 1 << 2 == 0 && !ctm.hides(c.states[n.states[below] as usize].flags, n.states[below]) {
+    // Only draw a floor when this layer does not continue into liquid below.
+    if bottom_layer
+        && liquids_at(c, n, below_cell).is_empty()
+        && walls & 1 << 2 == 0
+        && !ctm.hides(c.states[n.states[below_cell] as usize].flags, n.states[below_cell])
+    {
         let corners = CORNERS[2].map(|p| [fx + p[0] as f32, fy, fz + p[2] as f32]);
-        mesh.quads[layer].push(quad(corners, WHOLE, t, biome, tint, [light16(n.light[below]); 4]));
+        mesh.quads[render_layer].push(quad(corners, WHOLE, t, biome, tint, [light16(n.light[below_cell]); 4]));
     }
 }

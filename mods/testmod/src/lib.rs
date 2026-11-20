@@ -514,6 +514,7 @@ fn init(r: &mut Registry) {
     // A liquid of its own, flowing by the engine's rules; its bucket fills from the base game's.
     r.liquid(&OIL)
         .block(|b| b.light_opacity(4).drag(0.4).tag("oil"))
+        .density(800)
         .flow_delay(15)
         .drop_off(2)
         .slope_find(3)

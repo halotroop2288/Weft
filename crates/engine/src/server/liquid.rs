@@ -9,7 +9,6 @@ use weft_abi::{ItemStack, block_flags as bf};
 
 use super::dim::Dim;
 use crate::content::{AIR, Content, LiquidDef};
-use crate::physics::Cells;
 use crate::world::DIRS;
 
 /// North, east, south, west: vanilla's horizontal order, which decides ties.
@@ -45,6 +44,11 @@ fn split_volume(existing: u32, incoming: u32) -> (u32, u32) {
     (total.min(8), total.saturating_sub(8))
 }
 
+/// Equal-density liquids need unequal volumes to establish an unambiguous layer order.
+fn can_mix_by_density_and_volume(a_density: i32, a_amount: u32, b_density: i32, b_amount: u32) -> bool {
+    a_density != b_density || a_amount != b_amount
+}
+
 /// Apply Dihydrogen Monoxide's one-unit horizontal equalization in the given neighbor order.
 /// A negative neighbor level marks a cell which cannot receive this liquid.
 fn equalize_levels(center: &mut u32, levels: &mut [i32; 4], order: [usize; 4], floor: u32) {
@@ -65,7 +69,7 @@ fn equalize_levels(center: &mut u32, levels: &mut [i32; 4], order: [usize; 4], f
 
 #[cfg(test)]
 mod tests {
-    use super::{equalize_levels, has_liquid_capacity, split_volume};
+    use super::{can_mix_by_density_and_volume, equalize_levels, has_liquid_capacity, split_volume};
 
     #[test]
     fn gravity_caps_destination_and_keeps_overflow() {
@@ -89,7 +93,15 @@ mod tests {
         let mut center = 5;
         let mut levels = [-1, 0, -1, 1];
         equalize_levels(&mut center, &mut levels, [0, 1, 2, 3]);
-        assert_eq!(center + levels.iter().filter(|&&v| v >= 0).map(|&v| v as u32).sum::<u32>(), 6);
+        assert_eq!(
+            center
+                + levels
+                    .iter()
+                    .filter(|&&v| v >= 0)
+                    .map(|&v| v as u32)
+                    .sum::<u32>(),
+            6
+        );
         assert_eq!(levels, [-1, 2, -1, 2]);
         assert_eq!(center, 2);
     }
@@ -113,8 +125,22 @@ mod tests {
         let mut b = [0, 0, -1, -1];
         equalize_levels(&mut east_first, &mut b, [1, 0, 2, 3], 0);
 
-        assert_eq!(north_first + a.iter().filter(|&&v| v >= 0).map(|&v| v as u32).sum::<u32>(), 8);
-        assert_eq!(east_first + b.iter().filter(|&&v| v >= 0).map(|&v| v as u32).sum::<u32>(), 8);
+        assert_eq!(
+            north_first
+                + a.iter()
+                    .filter(|&&v| v >= 0)
+                    .map(|&v| v as u32)
+                    .sum::<u32>(),
+            8
+        );
+        assert_eq!(
+            east_first
+                + b.iter()
+                    .filter(|&&v| v >= 0)
+                    .map(|&v| v as u32)
+                    .sum::<u32>(),
+            8
+        );
         assert_eq!(north_first, 3);
         assert_eq!(east_first, 3);
         assert_eq!(a[0], 3);
@@ -130,6 +156,13 @@ mod tests {
         equalize_levels(&mut center, &mut levels, [0, 1, 2, 3], 1);
         assert_eq!(center, 1);
         assert_eq!(center + levels.iter().map(|&v| v as u32).sum::<u32>(), 8);
+    }
+
+    #[test]
+    fn compound_mixing_requires_an_unambiguous_layer_order() {
+        assert!(!can_mix_by_density_and_volume(1000, 3, 1000, 3));
+        assert!(can_mix_by_density_and_volume(1000, 2, 1000, 3));
+        assert!(can_mix_by_density_and_volume(800, 3, 1000, 3));
     }
 
     #[test]
@@ -156,8 +189,77 @@ mod tests {
 }
 
 impl Dim {
+    /// Every liquid constituent in a cell. A cell's capacity is shared by all constituents.
+    fn fluids(&self, space_id: u64, c: &Content, p: IVec3) -> Vec<Fluid> {
+        self.parts(space_id, p)
+            .into_iter()
+            .filter_map(|state| decode(c, state))
+            .collect()
+    }
+
     fn fluid(&self, space_id: u64, c: &Content, p: IVec3) -> Option<Fluid> {
-        self.space(space_id).liquid(c, p).and_then(|s| decode(c, s))
+        self.fluids(space_id, c, p).into_iter().next()
+    }
+
+    fn fluid_of(&self, space_id: u64, c: &Content, p: IVec3, id: u16) -> Option<Fluid> {
+        self.fluids(space_id, c, p)
+            .into_iter()
+            .find(|fluid| fluid.id == id)
+    }
+
+    fn liquid_volume(&self, space_id: u64, c: &Content, p: IVec3) -> u32 {
+        self.fluids(space_id, c, p).iter().map(|f| f.amount).sum()
+    }
+
+    /// Different liquids can share a cell unless their equal-density/equal-volume
+    /// tie makes their vertical order ambiguous.
+    fn can_mix(&self, c: &Content, incoming: Fluid, existing: Fluid) -> bool {
+        if incoming.id == existing.id {
+            return true;
+        }
+        let incoming_def = &c.liquids[incoming.id as usize];
+        let existing_def = &c.liquids[existing.id as usize];
+        let incoming_state = encode(incoming_def, incoming.amount);
+        let existing_state = encode(existing_def, existing.amount);
+        let reacts = |def: &LiquidDef, state| {
+            def.falls_into
+                .iter()
+                .any(|&(matcher, _)| c.matchers.has(matcher, state))
+                || def
+                    .reacts_with
+                    .iter()
+                    .any(|&(matcher, _)| c.matchers.has(matcher, state))
+        };
+        !reacts(incoming_def, existing_state)
+            && !reacts(existing_def, incoming_state)
+            && can_mix_by_density_and_volume(incoming_def.density, incoming.amount, existing_def.density, existing.amount)
+    }
+
+    /// Keep the resident liquid order deterministic: lightest first, then the smaller
+    /// constituent when densities tie. Non-liquid parts retain their relative positions.
+    fn sort_liquid_parts(&mut self, space_id: u64, c: &'static Content, p: IVec3) -> bool {
+        let Some(main) = self.get(space_id, p) else { return true };
+        let mut parts: Vec<_> = self.space(space_id).layout(p).residents(main).collect();
+        let mut liquids: Vec<_> = parts
+            .iter()
+            .copied()
+            .filter(|part| c.states[part.state as usize].liquid.is_some())
+            .collect();
+        if liquids.is_empty() {
+            return true;
+        }
+        liquids.sort_by_key(|part| {
+            let fluid = decode(c, part.state).expect("liquid state must decode");
+            (c.liquids[fluid.id as usize].density, fluid.amount, fluid.id)
+        });
+        let mut next = liquids.into_iter();
+        for part in &mut parts {
+            if c.states[part.state as usize].liquid.is_some() {
+                *part = next.next().expect("same number of liquid parts");
+            }
+        }
+        self.write_residents(space_id, c, p, &mut parts, false)
+            .is_some()
     }
 
     /// Whether what shares the cell at `p` with a liquid closes its side towards `d`.
@@ -194,9 +296,8 @@ impl Dim {
             .any(|s| c.states[s as usize].liquid.is_none() && c.may_share(s, source))
     }
 
-    /// Whether a cell can receive more of this liquid.
-    /// A full cell, a different liquid, an unloaded cell, and a fluid container are not destinations.
-    fn can_flow_into(&self, space_id: u64, c: &Content, p: IVec3, l: u16) -> bool {
+    /// Whether a cell can receive this liquid without displacing a constituent.
+    fn can_flow_into(&self, space_id: u64, c: &Content, p: IVec3, l: u16, incoming_amount: u32) -> bool {
         if self
             .space(space_id)
             .bounds
@@ -205,10 +306,22 @@ impl Dim {
         {
             return false;
         }
-        if let Some(f) = self.fluid(space_id, c, p) {
-            return f.id == l && has_liquid_capacity(f.amount);
+        let existing = self.fluids(space_id, c, p);
+        if existing.is_empty() {
+            return self.has_room(space_id, c, p);
         }
-        self.has_room(space_id, c, p)
+        let total: u32 = existing.iter().map(|f| f.amount).sum();
+        let combined = incoming_amount
+            + existing
+                .iter()
+                .find(|fluid| fluid.id == l)
+                .map_or(0, |fluid| fluid.amount);
+        let incoming = Fluid { id: l, amount: combined, source: false };
+        total.saturating_add(incoming_amount) <= 8
+            && existing
+                .into_iter()
+                .filter(|other| other.id != l)
+                .all(|other| self.can_mix(c, incoming, other))
     }
 
     fn spread_to(&mut self, space_id: u64, c: &'static Content, p: IVec3, state: u32) -> Option<()> {
@@ -224,47 +337,37 @@ impl Dim {
         Some(())
     }
 
-    /// Write an amount into an empty cell or update/remove this liquid's existing part.
+    /// Write one constituent's amount without replacing the other liquids in the cell.
     fn set_liquid_level(&mut self, space_id: u64, c: &'static Content, p: IVec3, l: u16, amount: u32) -> bool {
-        let old = self.space(space_id).liquid(c, p);
-        if let Some(old) = old {
-            if c.states[old as usize].liquid != Some(l) {
-                return false;
-            }
-            let next = if amount == 0 { AIR } else { encode(&c.liquids[l as usize], amount) };
-            return self.replace_part(space_id, c, p, old, next);
-        }
-        if amount == 0 {
-            return true;
-        }
-        self.spread_to(space_id, c, p, encode(&c.liquids[l as usize], amount)).is_some()
+        let old = self
+            .parts(space_id, p)
+            .into_iter()
+            .find(|&state| c.states[state as usize].liquid == Some(l));
+        let changed = match (old, amount) {
+            (Some(old), 0) => self.replace_part(space_id, c, p, old, AIR),
+            (Some(old), amount) => self.replace_part(space_id, c, p, old, encode(&c.liquids[l as usize], amount)),
+            (None, 0) => true,
+            (None, amount) => self.add_part(space_id, c, p, encode(&c.liquids[l as usize], amount)),
+        };
+        changed && self.sort_liquid_parts(space_id, c, p)
     }
 
     /// A full liquid cell is solid for slope searches.
     /// A partially filled cell can still receive volume and therefore remains a valid passage.
     fn is_hole(&self, space_id: u64, c: &Content, p: IVec3, l: u16, down: IVec3) -> bool {
-        !self.sealed(space_id, c, p, down) && self.can_flow_into(space_id, c, p, l)
+        !self.sealed(space_id, c, p, down) && self.can_flow_into(space_id, c, p, l, 1)
     }
 
     /// Shortest horizontal distance from this cell to a cell with room in the gravity direction.
     /// The previous direction prevents immediately walking back along the edge we arrived through.
-    fn slope_distance(
-        &self,
-        space_id: u64,
-        c: &Content,
-        p: IVec3,
-        depth: u32,
-        from: IVec3,
-        l: u16,
-        down: IVec3,
-    ) -> u32 {
+    fn slope_distance(&self, space_id: u64, c: &Content, p: IVec3, depth: u32, from: IVec3, l: u16, down: IVec3) -> u32 {
         let mut min = u32::MAX;
         for d in HORIZONTAL {
             if d == from {
                 continue;
             }
             let next = p + d;
-            if !self.can_flow_into(space_id, c, next, l) || self.sealed(space_id, c, p, d) {
+            if !self.can_flow_into(space_id, c, next, l, 1) || self.sealed(space_id, c, p, d) {
                 continue;
             }
             if self.is_hole(space_id, c, next + down, l, down) {
@@ -285,15 +388,12 @@ impl Dim {
         let mut nearest = u32::MAX;
         for (i, d) in HORIZONTAL.into_iter().enumerate() {
             let next = p + d;
-            if self.sealed(space_id, c, p, d) || !self.can_flow_into(space_id, c, next, l) {
+            if self.sealed(space_id, c, p, d) || !self.can_flow_into(space_id, c, next, l, 1) {
                 continue;
             }
             open[i] = true;
-            let distance = if self.is_hole(space_id, c, next + down, l, down) {
-                0
-            } else {
-                self.slope_distance(space_id, c, next, 1, -d, l, down)
-            };
+            let distance =
+                if self.is_hole(space_id, c, next + down, l, down) { 0 } else { self.slope_distance(space_id, c, next, 1, -d, l, down) };
             distances[i] = distance;
             nearest = nearest.min(distance);
         }
@@ -338,14 +438,23 @@ impl Dim {
 
         // Gravity transfers the entire cell's volume into the next cell. If that cell overflows,
         // the excess remains in the cell the liquid came from.
-        if !self.sealed(space_id, c, p, down) && self.can_flow_into(space_id, c, below, f.id) {
-            let existing = self.fluid(space_id, c, below).map_or(0, |n| n.amount);
-            let (next_below, overflow) = split_volume(existing, f.amount);
-            if self.set_liquid_level(space_id, c, below, f.id, next_below)
-                && !self.set_liquid_level(space_id, c, p, f.id, overflow)
-            {
-                // A failed source update must not leave the destination with duplicated volume.
-                self.set_liquid_level(space_id, c, below, f.id, existing);
+        let below_total = self.liquid_volume(space_id, c, below);
+        let incoming = f.amount.min(8u32.saturating_sub(below_total));
+        if incoming > 0 && !self.sealed(space_id, c, p, down) && self.can_flow_into(space_id, c, below, f.id, incoming) {
+            let previous_below = self.parts(space_id, below);
+            let existing = self
+                .fluid_of(space_id, c, below, f.id)
+                .map_or(0, |n| n.amount);
+            let (next_below, overflow) = split_volume(existing, incoming);
+            let wrote_below = if existing > 0 {
+                self.set_liquid_level(space_id, c, below, f.id, next_below)
+            } else {
+                self.add_part(space_id, c, below, encode(&c.liquids[f.id as usize], incoming)) && self.sort_liquid_parts(space_id, c, below)
+            };
+            if wrote_below && !self.set_liquid_level(space_id, c, p, f.id, f.amount - incoming + overflow) {
+                // Restore the entire destination layout, not just its topmost liquid.
+                let first = previous_below.first().copied().unwrap_or(AIR);
+                self.write_cell(space_id, c, below, first, Some(previous_below.into_iter().skip(1).collect()), false);
             }
             return;
         }
@@ -356,27 +465,26 @@ impl Dim {
         let mut levels = [-1; 4];
         for (i, d) in HORIZONTAL.into_iter().enumerate() {
             if directions[i] {
-                levels[i] = self.fluid(space_id, c, p + d).map_or(0, |n| n.amount) as i32;
+                levels[i] = self
+                    .fluid_of(space_id, c, p + d, f.id)
+                    .map_or(0, |n| n.amount) as i32;
             }
         }
         let before = levels;
         let mut desired_center = f.amount;
-        equalize_levels(
-            &mut desired_center,
-            &mut levels,
-            self.shuffled_horizontal(p),
-            0,
-        );
+        equalize_levels(&mut desired_center, &mut levels, self.shuffled_horizontal(p), 0);
 
-        let mut moved = Vec::new();
+        let mut moved: Vec<(IVec3, Vec<u32>)> = Vec::new();
         let mut center = f.amount;
         let mut all_neighbors_written = true;
         for (i, d) in HORIZONTAL.into_iter().enumerate() {
             if levels[i] >= 0 && levels[i] != before[i] {
+                let at = p + d;
+                let previous = self.parts(space_id, at);
                 let amount = (levels[i] - before[i]) as u32;
-                if self.set_liquid_level(space_id, c, p + d, f.id, levels[i] as u32) {
+                if self.set_liquid_level(space_id, c, at, f.id, levels[i] as u32) {
                     center -= amount;
-                    moved.push((p + d, before[i] as u32));
+                    moved.push((at, previous));
                 } else {
                     all_neighbors_written = false;
                 }
@@ -386,9 +494,10 @@ impl Dim {
             center = desired_center;
         }
         if center != f.amount && !self.set_liquid_level(space_id, c, p, f.id, center) {
-            // Roll back successful neighbor writes if the source could not be updated.
-            for (at, amount) in moved {
-                self.set_liquid_level(space_id, c, at, f.id, amount);
+            // Restore complete layouts, including every constituent and non-liquid part.
+            for (at, previous) in moved {
+                let first = previous.first().copied().unwrap_or(AIR);
+                self.write_cell(space_id, c, at, first, Some(previous.into_iter().skip(1).collect()), false);
             }
         }
     }
@@ -405,15 +514,17 @@ impl Dim {
         result: u32,
     ) -> Option<bool> {
         for (id, liquid) in c.liquids.iter().enumerate() {
-            if !liquid.falls_into.iter().any(|&(matcher, into)| {
-                into == result && c.matchers.has(matcher, touching_state)
-            }) {
+            if !liquid
+                .falls_into
+                .iter()
+                .any(|&(matcher, into)| into == result && c.matchers.has(matcher, touching_state))
+            {
                 continue;
             }
 
             let down = if liquid.rises { IVec3::Y } else { IVec3::NEG_Y };
             let source_pos = p - down;
-            let Some(source) = self.fluid(space_id, c, source_pos) else {
+            let Some(source) = self.fluid_of(space_id, c, source_pos, id as u16) else {
                 return Some(false);
             };
             if source.id as usize != id {
@@ -422,13 +533,7 @@ impl Dim {
             if !self.replace_part(space_id, c, p, touching_state, result) {
                 return Some(false);
             }
-            if !self.set_liquid_level(
-                space_id,
-                c,
-                source_pos,
-                source.id,
-                source.amount.saturating_sub(1),
-            ) {
+            if !self.set_liquid_level(space_id, c, source_pos, source.id, source.amount.saturating_sub(1)) {
                 self.replace_part(space_id, c, p, result, touching_state);
                 return Some(false);
             }
@@ -437,32 +542,30 @@ impl Dim {
 
         // Horizontal/side-contact reactions consume one unit of the liquid being touched.
         // The reacting liquid at p is transformed; the adjacent liquid supplies the cost.
-        for liquid in &c.liquids {
+        for (liquid_id, liquid) in c.liquids.iter().enumerate() {
             for &(matcher, into) in &liquid.reacts_with {
                 if into != result {
                     continue;
                 }
                 for d in DIRS {
                     let water_pos = p + d;
-                    let Some(water_state) = self.space(space_id).liquid(c, water_pos) else {
+                    let Some(water_state) = self.parts(space_id, water_pos).into_iter().find(|&state| {
+                        c.states[state as usize]
+                            .liquid
+                            .is_some_and(|id| id as usize == liquid_id)
+                    }) else {
                         continue;
                     };
                     if !c.matchers.has(matcher, water_state) {
                         continue;
                     }
-                    let Some(water) = self.fluid(space_id, c, water_pos) else {
+                    let Some(water) = decode(c, water_state) else {
                         continue;
                     };
                     if !self.replace_part(space_id, c, p, touching_state, result) {
                         return Some(false);
                     }
-                    if !self.set_liquid_level(
-                        space_id,
-                        c,
-                        water_pos,
-                        water.id,
-                        water.amount.saturating_sub(1),
-                    ) {
+                    if !self.set_liquid_level(space_id, c, water_pos, water.id, water.amount.saturating_sub(1)) {
                         self.replace_part(space_id, c, p, result, touching_state);
                         return Some(false);
                     }

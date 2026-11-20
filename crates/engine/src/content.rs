@@ -702,6 +702,9 @@ pub struct LiquidDef {
     pub drop_off: u32,
     pub slope_find: u32,
     pub renewable: u32,
+    /// Density from `abi::comp::liquid::DENSITY`; lower values float above higher values.
+    /// Negative values retain the existing convention for liquids that flow upward.
+    pub density: i32,
     /// Lighter than air: flows up.
     pub rises: bool,
     pub temperature: u32,
@@ -3969,6 +3972,7 @@ fn freeze_liquids(
             });
             let mut environment = vec![base];
             environment.extend(e.or::<Vec<abi::environment::EnvironmentLayer>>(abi::environment::COMPONENT, Vec::new()));
+            let density = e.or(l::DENSITY, 1000);
             Some(LiquidDef {
                 name: e.name.clone(),
                 first_state: def.first_state,
@@ -3976,7 +3980,8 @@ fn freeze_liquids(
                 drop_off: e.or(l::DROP_OFF, 1u32).clamp(1, 7),
                 slope_find: e.or(l::SLOPE_FIND, 4u32).min(8),
                 renewable: e.or(l::RENEWABLE, u32::MAX),
-                rises: e.or(l::DENSITY, 1000) < 0,
+                density,
+                rises: density < 0,
                 temperature: e.or(l::HEAT, 300),
                 environment,
                 falls_into: Vec::new(),
@@ -4031,7 +4036,9 @@ fn freeze_liquids(
     for (liquid, touching, liquid_text, touching_text, source, flowing, falls_into) in reactions.into_iter().flatten() {
         // The side it comes from, against the way it flows.
         let from = |rises: bool| if rises { "down" } else { "up" };
-        let falling_id = liquids.iter().position(|l| matchers.has(liquid, l.first_state));
+        let falling_id = liquids
+            .iter()
+            .position(|l| matchers.has(liquid, l.first_state));
         if let (Some(into), Some(id)) = (falls_into, falling_id) {
             liquids[id].falls_into.push((touching, into));
         }
