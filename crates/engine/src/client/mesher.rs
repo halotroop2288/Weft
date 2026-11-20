@@ -593,7 +593,7 @@ fn liquid(c: &Content, n: &Neighborhood, ctm: &super::ctm::Ctm, mesh: &mut Mesh,
     // this liquid is its uppermost constituent. Likewise, vertical continuity
     // exists only when it is the bottommost constituent above.
     let liquid_density = c.liquids[liquid_id as usize].density;
-    let layer_thickness = top - bottom;
+    let layer_thickness = fluids[layer_index].2 as f32 / 9.0;
     let height = |xx: i32, zz: i32| -> Option<f32> {
         let neighbor = liquid_bounds(c, n, xx, y, zz);
         let above = liquids_at(c, n, pidx(xx, y + 1, zz));
@@ -618,7 +618,7 @@ fn liquid(c: &Content, n: &Neighborhood, ctm: &super::ctm::Ctm, mesh: &mut Mesh,
                 };
                 c.liquids[support_id as usize].density > liquid_density
             })?;
-        Some((support_top + layer_thickness).min(1.0))
+        Some((*support_top + layer_thickness).min(1.0))
     };
     let corner_h = |cx: i32, cz: i32| -> f32 {
         // Average the top height of this constituent over columns sharing the corner.
