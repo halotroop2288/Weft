@@ -372,7 +372,6 @@ pub fn register(r: &mut Registry) {
                 .set_text(&BUBBLE, abi::particle::BUBBLE)
                 .tag("water")
         })
-        .renewable(2)
         .fog(0x050533, -8.0, 96.0)
         .environment(
             Environment::new("water_acoustics")

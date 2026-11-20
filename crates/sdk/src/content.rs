@@ -3810,12 +3810,6 @@ impl LiquidBuilder<'_> {
     pub fn slope_find(self, n: u32) -> Self {
         self.set(&crate::comps::liquid::SLOPE_FIND, n)
     }
-    /// New sources form where at least `sources` sources are beside a spot over solid ground
-    /// (vanilla water 2). 0: always, one bucket fills everything up to its level; more than the
-    /// sides there are: never, as without this call.
-    pub fn renewable(self, sources: u32) -> Self {
-        self.set(&crate::comps::liquid::RENEWABLE, sources)
-    }
     /// Rises instead of falling.
     pub fn flows_up(self) -> Self {
         self.set(&crate::comps::liquid::DENSITY, -1000)
