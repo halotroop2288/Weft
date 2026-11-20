@@ -565,12 +565,12 @@ fn liquid_bounds(c: &Content, n: &Neighborhood, x: i32, y: i32, z: i32) -> Vec<(
         - 1.0;
     let mut bounds = Vec::with_capacity(fluids.len());
     for (index, &(state, id, amount)) in fluids.iter().enumerate() {
-        let lower: u32 = fluids.iter().skip(index + 1).map(|(_, _, amount)| *amount).sum();
-        let bottom = if index + 1 == fluids.len() && !below_fluids.is_empty() {
-            below_surface
-        } else {
-            lower as f32 / 9.0
-        };
+        let lower: u32 = fluids
+            .iter()
+            .skip(index + 1)
+            .map(|(_, _, amount)| *amount)
+            .sum();
+        let bottom = if index + 1 == fluids.len() && !below_fluids.is_empty() { below_surface } else { lower as f32 / 9.0 };
         bounds.push((state, id, bottom, (lower + amount) as f32 / 9.0));
     }
     bounds
@@ -597,7 +597,10 @@ fn liquid(c: &Content, n: &Neighborhood, ctm: &super::ctm::Ctm, mesh: &mut Mesh,
     let height = |xx: i32, zz: i32| -> Option<f32> {
         let neighbor = liquid_bounds(c, n, xx, y, zz);
         let above = liquids_at(c, n, pidx(xx, y + 1, zz));
-        if above.last().is_some_and(|&(_, above_id, _)| above_id == liquid_id) {
+        if above
+            .last()
+            .is_some_and(|&(_, above_id, _)| above_id == liquid_id)
+        {
             return Some(1.0);
         }
 
@@ -610,14 +613,12 @@ fn liquid(c: &Content, n: &Neighborhood, ctm: &super::ctm::Ctm, mesh: &mut Mesh,
         // surface slope from the supporting liquid's surface. This matters
         // at corners where the neighboring column has water but no oil:
         // oil should follow the water level beneath it instead of staying flat.
-        let (_, _, _, support_top) = neighbor
-            .iter()
-            .find(|&&(state, _, _, _)| {
-                let Some(support_id) = c.states[state as usize].liquid else {
-                    return false;
-                };
-                c.liquids[support_id as usize].density > liquid_density
-            })?;
+        let (_, _, _, support_top) = neighbor.iter().find(|&&(state, _, _, _)| {
+            let Some(support_id) = c.states[state as usize].liquid else {
+                return false;
+            };
+            c.liquids[support_id as usize].density > liquid_density
+        })?;
         Some((*support_top + layer_thickness).min(1.0))
     };
     let corner_h = |cx: i32, cz: i32| -> f32 {
@@ -689,9 +690,7 @@ fn liquid(c: &Content, n: &Neighborhood, ctm: &super::ctm::Ctm, mesh: &mut Mesh,
         }
         let neighbor = liquid_bounds(c, n, x + dx, y, z + dz);
         let mut visible = vec![(bottom, top)];
-        for &(_, _, neighbor_bottom, neighbor_top) in
-            neighbor.iter().filter(|&&(_, id, _, _)| id == liquid_id)
-        {
+        for &(_, _, neighbor_bottom, neighbor_top) in neighbor.iter().filter(|&&(_, id, _, _)| id == liquid_id) {
             let mut next = Vec::new();
             for (lo, hi) in visible {
                 if neighbor_top <= lo || neighbor_bottom >= hi {
@@ -713,11 +712,7 @@ fn liquid(c: &Content, n: &Neighborhood, ctm: &super::ctm::Ctm, mesh: &mut Mesh,
             }
             let corners = CORNERS[dir].map(|p| {
                 let yy = if p[1] == 1 {
-                    if (hi - top).abs() < f32::EPSILON {
-                        if top_layer { hat(p[0], p[2]) } else { top }
-                    } else {
-                        hi
-                    }
+                    if (hi - top).abs() < f32::EPSILON { if top_layer { hat(p[0], p[2]) } else { top } } else { hi }
                 } else {
                     lo
                 };
