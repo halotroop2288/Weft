@@ -592,15 +592,33 @@ fn liquid(c: &Content, n: &Neighborhood, ctm: &super::ctm::Ctm, mesh: &mut Mesh,
     // A neighboring column only contributes to this liquid's top surface if
     // this liquid is its uppermost constituent. Likewise, vertical continuity
     // exists only when it is the bottommost constituent above.
+    let liquid_density = c.liquids[liquid_id as usize].density;
+    let layer_thickness = top - bottom;
     let height = |xx: i32, zz: i32| -> Option<f32> {
         let neighbor = liquid_bounds(c, n, xx, y, zz);
-        let &(_, _, _, top) = neighbor.iter().find(|&&(_, id, _, _)| id == liquid_id)?;
         let above = liquids_at(c, n, pidx(xx, y + 1, zz));
         if above.last().is_some_and(|&(_, above_id, _)| above_id == liquid_id) {
-            Some(1.0)
-        } else {
-            Some(top)
+            return Some(1.0);
         }
+
+        // Prefer the actual surface of this liquid in the neighboring column.
+        if let Some(&(_, _, _, top)) = neighbor.iter().find(|&&(_, id, _, _)| id == liquid_id) {
+            return Some(top);
+        }
+
+        // When this liquid is floating on a denser liquid, continue its
+        // surface slope from the supporting liquid's surface. This matters
+        // at corners where the neighboring column has water but no oil:
+        // oil should follow the water level beneath it instead of staying flat.
+        let (_, _, _, support_top) = neighbor
+            .iter()
+            .find(|&&(state, _, _, _)| {
+                let Some(support_id) = c.states[state as usize].liquid else {
+                    return false;
+                };
+                c.liquids[support_id as usize].density > liquid_density
+            })?;
+        Some((support_top + layer_thickness).min(1.0))
     };
     let corner_h = |cx: i32, cz: i32| -> f32 {
         // Average the top height of this constituent over columns sharing the corner.
