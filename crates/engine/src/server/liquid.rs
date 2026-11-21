@@ -224,10 +224,6 @@ impl Dim {
             .collect()
     }
 
-    fn fluid(&self, space_id: u64, c: &Content, p: IVec3) -> Option<Fluid> {
-        self.fluids(space_id, c, p).into_iter().next()
-    }
-
     fn fluid_of(&self, space_id: u64, c: &Content, p: IVec3, id: u16) -> Option<Fluid> {
         self.fluids(space_id, c, p)
             .into_iter()
@@ -349,19 +345,6 @@ impl Dim {
                 .into_iter()
                 .filter(|other| other.id != l)
                 .all(|other| self.can_mix(c, incoming, other))
-    }
-
-    fn spread_to(&mut self, space_id: u64, c: &'static Content, p: IVec3, state: u32) -> Option<()> {
-        if self.fluid(space_id, c, p).is_some() || self.is_fluid_container(space_id, c, p, c.states[state as usize].liquid?) {
-            return None;
-        }
-        let was = self.parts(space_id, p);
-        self.set(space_id, c, p, state)?;
-        // Plants and torches wash away with their drops, like vanilla.
-        for old in was {
-            self.drop_block_loot(space_id, c, p, old, ItemStack::EMPTY, false, 0);
-        }
-        Some(())
     }
 
     /// Write one constituent's amount without replacing the other liquids in the cell.
