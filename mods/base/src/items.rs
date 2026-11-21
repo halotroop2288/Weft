@@ -77,8 +77,10 @@ pub fn register(r: &mut Registry) {
     // What gravel and clay drop.
     r.item(&FLINT).tab(&crate::tabs::INGREDIENTS);
     r.item(&CLAY_BALL).tab(&crate::tabs::INGREDIENTS);
-    // Filled buckets come with their liquids (blocks.rs); the engine fills and pours them.
-    r.item(&BUCKET).max_stack(16).tab(&crate::tabs::TOOLS);
+    // Bucket contents belong to individual stacks, not fixed per-liquid item definitions.
+    r.item(&BUCKET).max_stack(1).tab(&crate::tabs::TOOLS);
+    r.item(Item::generated("water_bucket".into())).max_stack(1).tab(&crate::tabs::TOOLS);
+    r.item(Item::generated("lava_bucket".into())).max_stack(1).tab(&crate::tabs::TOOLS);
     r.set("lava_bucket", &FUEL, 20000);
     r.tag("buckets/lava", &["lava_bucket"]);
     r.tag("bread", &["bread"]);
