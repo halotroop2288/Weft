@@ -708,6 +708,8 @@ pub struct LiquidDef {
     /// Lighter than air: flows up.
     pub rises: bool,
     pub temperature: u32,
+    /// Item texture layered onto a bucket while it contains this liquid.
+    pub bucket_texture: String,
     pub environment: Vec<abi::environment::EnvironmentLayer>,
     /// Reactions which turn a block touched by this falling liquid into a result state.
     /// Each entry is (matcher for the touched block, result state).
@@ -3983,6 +3985,7 @@ fn freeze_liquids(
                 density,
                 rises: density < 0,
                 temperature: e.or(l::HEAT, 300),
+                bucket_texture: e.text(l::BUCKET_TEXTURE).unwrap_or_default().to_string(),
                 environment,
                 falls_into: Vec::new(),
                 reacts_with: Vec::new(),
