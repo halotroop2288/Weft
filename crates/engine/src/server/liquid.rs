@@ -613,7 +613,15 @@ impl Dim {
 
     /// Transfer liquid between a stack-backed bucket and the targeted cell. Ordinary use fills;
     /// sneaking use pours. The new held stack, or `None` if nothing changed.
-    pub fn use_container(&mut self, space_id: u64, c: &'static Content, player: u64, held: ItemStack) -> Option<ItemStack> {
+    pub fn use_container(
+        &mut self,
+        space_id: u64,
+        c: &'static Content,
+        player: u64,
+        held: ItemStack,
+        target: Option<(IVec3, u8)>,
+        sneak: bool,
+    ) -> Option<ItemStack> {
         if held.is_empty() {
             return None;
         }
@@ -621,17 +629,31 @@ impl Dim {
         if !c.components.has(crate::components::ITEM, held.item, marker) {
             return None;
         }
+        if let Some((block, face)) = target {
+            let state = self.get(space_id, block)?;
+            return self.use_bucket_at(space_id, c, player, held, block, face, state, sneak);
+        }
         let reach = self.block_reach(space_id, c, player);
         let flags = weft_abi::ray::BLOCKS | weft_abi::ray::LIQUIDS;
         let hit = self.look_ray(space_id, c, player, reach, flags)?;
-        self.with_space(c, hit.frame, |region, _, _| region.use_bucket_at(c, player, held, hit))?
+        self.with_space(c, hit.frame, |region, actual_space, _| {
+            region.use_bucket_at(actual_space, c, player, held, hit.block, hit.face, hit.state, sneak)
+        })?
     }
 
-    fn use_bucket_at(&mut self, c: &'static Content, player: u64, held: ItemStack, hit: crate::physics::Hit) -> Option<ItemStack> {
-        let space_id = hit.frame;
+    fn use_bucket_at(
+        &mut self,
+        space_id: u64,
+        c: &'static Content,
+        player: u64,
+        held: ItemStack,
+        block: IVec3,
+        face: u8,
+        block_state: u32,
+        sneak: bool,
+    ) -> Option<ItemStack> {
         let maybe_player = self.entities.get(player);
         let creative = maybe_player.is_some_and(|e| e.mode.has(crate::tag_bits::game_mode::NO_COSTS));
-        let sneak = maybe_player.is_some_and(|e| e.pose.eq(&crate::world::Pose::CROUCH));
         let liquid_component = c.components.id(weft_abi::comp::BUCKET_LIQUID)?;
         let amount_component = c.components.id(weft_abi::comp::BUCKET_AMOUNT)?;
         let texture_component = c.components.id(weft_abi::comp::BUCKET_TEXTURE)?;
@@ -663,7 +685,7 @@ impl Dim {
             if stored_amount >= BUCKET_CAPACITY {
                 return None;
             }
-            let fluids = self.fluids(space_id, c, hit.block);
+            let fluids = self.fluids(space_id, c, block);
             let fluid = if stored_amount > 0 {
                 fluids
                     .into_iter()
@@ -679,17 +701,17 @@ impl Dim {
             }
             let state = encode(&c.liquids[fluid.id as usize], fluid.amount);
             let mut q =
-                weft_abi::Query { entity: player, pos: hit.block.to_array().into(), state, item: held.item, ..weft_abi::Query::DEFAULT };
+                weft_abi::Query { entity: player, pos: block.to_array().into(), state, item: held.item, ..weft_abi::Query::DEFAULT };
             if !self.ask(space_id, c, weft_abi::action::BREAK_BLOCK, &mut q) {
                 return None;
             }
             if !creative {
                 let remaining = fluid.amount - levels;
                 let next = if remaining == 0 { AIR } else { encode(&c.liquids[fluid.id as usize], remaining) };
-                if !self.replace_part(space_id, c, hit.block, state, next) {
+                if !self.replace_part(space_id, c, block, state, next) {
                     return None;
                 }
-                self.sort_liquid_parts(space_id, c, hit.block);
+                self.sort_liquid_parts(space_id, c, block);
             }
             let texture = &c.liquids[fluid.id as usize].bucket_texture;
             return Some(set_contents(held, Some(fluid.id), stored_amount + levels * MILLIBUCKETS_PER_LEVEL, Some(texture.as_str())));
@@ -700,26 +722,37 @@ impl Dim {
             return None;
         }
         let replaceable = |state: u32| c.states[state as usize].flags & bf::REPLACEABLE != 0;
-        let target = if c.states[hit.state as usize].liquid.is_some() || replaceable(hit.state) {
-            hit.block
-        } else {
-            hit.block + DIRS[hit.face as usize]
-        };
-        if !self.can_hold_liquid(space_id, c, target, c.liquids[liquid as usize].first_state) {
-            return None;
+        let has_liquid = !self.fluids(space_id, c, block).is_empty();
+        let preferred = if has_liquid || replaceable(block_state) { block } else { block + DIRS[face as usize] };
+        let adjacent = block + DIRS[face as usize];
+        let mut placement = None;
+        let mut previous = None;
+        for target in [preferred, adjacent] {
+            if placement.is_some() {
+                break;
+            }
+            if previous == Some(target) {
+                continue;
+            }
+            previous = Some(target);
+            if !self.can_hold_liquid(space_id, c, target, c.liquids[liquid as usize].first_state) {
+                continue;
+            }
+            let existing = self.fluids(space_id, c, target);
+            let used_levels = bucket_pour_levels(stored_amount, existing.iter().map(|f| f.amount).sum());
+            if used_levels == 0 {
+                continue;
+            }
+            let incoming = Fluid { id: liquid, amount: used_levels, source: used_levels == 8 };
+            if existing
+                .iter()
+                .any(|other| !self.can_mix(c, incoming, *other))
+            {
+                continue;
+            }
+            placement = Some((target, existing, used_levels));
         }
-        let existing = self.fluids(space_id, c, target);
-        let used_levels = bucket_pour_levels(stored_amount, existing.iter().map(|f| f.amount).sum());
-        if used_levels == 0 {
-            return None;
-        }
-        let incoming = Fluid { id: liquid, amount: used_levels, source: used_levels == 8 };
-        if existing
-            .iter()
-            .any(|other| !self.can_mix(c, incoming, *other))
-        {
-            return None;
-        }
+        let (target, existing, used_levels) = placement?;
         let state = encode(&c.liquids[liquid as usize], used_levels);
         let mut q = weft_abi::Query { entity: player, pos: target.to_array().into(), state, item: held.item, ..weft_abi::Query::DEFAULT };
         if !self.ask(space_id, c, weft_abi::action::PLACE_BLOCK, &mut q) {

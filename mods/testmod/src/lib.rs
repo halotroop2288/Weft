@@ -329,8 +329,9 @@ fn init(r: &mut Registry) {
         .tab(&BASE_TOOLS);
     r.shapeless(&CRAFTING, "base:gravel", 1, &["hammer", "base:cobblestone"], 0)
         .wear(0, 1);
-    r.shapeless(&CRAFTING, "base:obsidian", 1, &["base:lava_bucket", "base:water_bucket"], 0)
-        .leaves(1, "base:bucket");
+    // TODO (PR #3): Use the new bucket item stack tag system here
+    // r.shapeless(&CRAFTING, "base:obsidian", 1, &["base:lava_bucket", "base:water_bucket"], 0)
+    //     .leaves(1, "base:bucket");
 
     r.block(&REGOLITH)
         .hardness(0.5)
