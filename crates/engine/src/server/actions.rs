@@ -78,7 +78,7 @@ impl Server {
         });
         // Where it can't be placed, it is used like any item (a seed's own use, a bucket of it).
         if !matches!(placed, Some(Some(()))) {
-            return self.use_in_hand(c, pi, slot, frame, Some((pos, face)));
+            return self.use_in_hand(c, pi, slot, frame, Some((pos, face)), sneak);
         }
         if !creative {
             r.entities
@@ -504,7 +504,7 @@ impl Server {
                         .send(ToClient::Swing { used_item: false, off_hand: false });
                 } else {
                     for slot in self.hands(c, pi) {
-                        if self.use_in_hand(c, pi, slot, 0, None) {
+                        if self.use_in_hand(c, pi, slot, 0, None, false) {
                             break;
                         }
                     }
@@ -964,7 +964,7 @@ impl Dim {
                 self.stop_using(id);
             } else if left <= 1 {
                 self.stop_using(id);
-                self.use_in_hand(space_id, c, id, slot, None, true);
+                self.use_in_hand(space_id, c, id, slot, None, true, false);
             } else if let Some(e) = self.entities.get_mut(id) {
                 e.use_done = Some((item, left - 1, slot));
             }
