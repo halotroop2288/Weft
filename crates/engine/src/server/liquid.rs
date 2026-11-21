@@ -586,7 +586,7 @@ impl Dim {
 
     /// Bucket logic for `player` holding `held`: pour a liquid item, or fill an empty container
     /// from a source it looks at. The new held stack, or `None` if nothing happened.
-    pub fn use_container(&mut self, space_id: u64, c: &'static Content, player: u64, held: ItemStack) -> Option<ItemStack> {
+    pub fn use_container(&mut self, space_id: u64, c: &'static Content, player: u64, held: ItemStack, sneak: bool) -> Option<ItemStack> {
         if held.is_empty() {
             return None;
         }
@@ -594,7 +594,7 @@ impl Dim {
         let reach = self.block_reach(space_id, c, player);
         let flags = if liquid.is_none() { crate::physics::LIQUID_SOURCES } else { weft_abi::ray::BLOCKS };
         let hit = self.look_ray(space_id, c, player, reach, flags)?;
-        self.with_space(c, hit.frame, |region, _, _| region.use_container_at(c, player, held, hit, liquid))?
+        self.with_space(c, hit.frame, |region, _, _| region.use_container_at(c, player, held, hit, liquid, sneak))?
     }
 
     fn use_container_at(
@@ -604,6 +604,7 @@ impl Dim {
         held: ItemStack,
         hit: crate::physics::Hit,
         liquid: Option<(u16, u32)>,
+        sneak: bool,
     ) -> Option<ItemStack> {
         let space_id = hit.frame;
         let creative = self
