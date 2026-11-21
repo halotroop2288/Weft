@@ -518,6 +518,7 @@ fn init(r: &mut Registry) {
         .flow_delay(15)
         .drop_off(2)
         .slope_find(3)
+        .bucket_texture("oil_bucket")
         .bucket(&OIL_BUCKET, &BUCKET, &BASE_TOOLS);
 
     // Healing food without touching the base game's eating code: any used item that heals (its

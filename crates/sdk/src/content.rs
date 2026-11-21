@@ -3822,6 +3822,10 @@ impl LiquidBuilder<'_> {
     pub fn heat(self, t: u32) -> Self {
         self.set(&crate::comps::liquid::HEAT, t)
     }
+    /// Texture layered over a partially filled bucket. Relative names are under item/.
+    pub fn bucket_texture(self, texture: &str) -> Self {
+        self.set_text(&crate::comps::liquid::BUCKET_TEXTURE, &crate::asset("item", texture))
+    }
     /// A camera environment preset: color (0xRRGGBB), start and end in blocks.
     /// Defaults to the average texture color, start -8 and end 96. Acoustics are independent.
     pub fn fog(self, rgb: u32, start: f32, end: f32) -> Self {

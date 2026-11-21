@@ -378,6 +378,7 @@ pub fn register(r: &mut Registry) {
                 .priority(-700)
                 .acoustics(900.0, 0.0, 1.0),
         )
+        .bucket_texture("water_bucket")
         .bucket(Item::generated("water_bucket".into()), &crate::items::BUCKET, &crate::tabs::TOOLS);
     r.liquid(&LAVA)
         .block(|b| {
@@ -389,10 +390,10 @@ pub fn register(r: &mut Registry) {
         .flow_delay(30)
         .drop_off(2)
         .slope_find(2)
-        .density(1000)
         .heat(1300)
         .fog(0x991A00, 0.25, 1.0)
         .no_overlay()
+        .bucket_texture("lava_bucket")
         .bucket(Item::generated("lava_bucket".into()), &crate::items::BUCKET, &crate::tabs::TOOLS);
     r.liquid_reaction("#cools_into_stone", "#water")
         .source_turns_into("obsidian")
