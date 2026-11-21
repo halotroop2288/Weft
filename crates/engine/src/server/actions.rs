@@ -802,6 +802,7 @@ impl Dim {
         slot: u32,
         target: Option<(IVec3, u8)>,
         finishing: bool,
+        sneak: bool,
     ) -> bool {
         let Some(e) = self.entities.get(entity) else { return false };
         let off_hand = c.game.entities[e.kind as usize].off == Some(slot);
@@ -877,7 +878,7 @@ impl Dim {
             }
             used = true;
         } else if def.on_use.is_none() {
-            if let Some(after) = self.use_container(space_id, c, entity, held) {
+            if let Some(after) = self.use_container(space_id, c, entity, held, sneak) {
                 if after != held {
                     self.entities.set_slot(entity, slot, after);
                 }
