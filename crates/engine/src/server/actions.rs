@@ -803,6 +803,7 @@ impl Dim {
         finishing: bool,
     ) -> bool {
         let Some(e) = self.entities.get(entity) else { return false };
+        let _sneak = e.pose == crate::world::Pose::CROUCH;
         let off_hand = c.game.entities[e.kind as usize].off == Some(slot);
         let held = self.entities.inventory_slot(entity, slot);
         let Some(def) = c.items.get(held.item as usize) else { return false };

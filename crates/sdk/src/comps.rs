@@ -409,15 +409,16 @@ pub mod feature {
 
 /// How a liquid flows and looks from inside (`abi::comp::liquid`).
 pub mod liquid {
-    use crate::Component;
     use crate::abi::comp::liquid as l;
     use crate::kind::Liquid;
+    use crate::{Component, Text};
     pub static DELAY: Component<u32, Liquid> = Component::named(l::DELAY);
     pub static DROP_OFF: Component<u32, Liquid> = Component::named(l::DROP_OFF);
     pub static SLOPE_FIND: Component<u32, Liquid> = Component::named(l::SLOPE_FIND);
     pub static RENEWABLE: Component<u32, Liquid> = Component::named(l::RENEWABLE);
     pub static DENSITY: Component<i32, Liquid> = Component::named(l::DENSITY);
     pub static HEAT: Component<u32, Liquid> = Component::named(l::HEAT);
+    pub static BUCKET_TEXTURE: Component<Text, Liquid> = Component::named(l::BUCKET_TEXTURE);
 }
 
 /// What a liquid reaction is made of (`abi::comp::reaction`).
@@ -483,6 +484,16 @@ pub mod terrain {
     pub static CAVE_BIOMES: Component<Vec<abi::CaveBiome>, Terrain> = Component::named(t::CAVE_BIOMES);
 }
 
+/// Per-stack bucket contents. These components are set by the engine as liquid is transferred.
+pub mod bucket {
+    use crate::abi::comp as c;
+    use crate::kind::Item;
+    use crate::{Component, Text};
+    pub static LIQUID: Component<u32, Item> = Component::named(c::BUCKET_LIQUID);
+    pub static AMOUNT: Component<u32, Item> = Component::named(c::BUCKET_AMOUNT);
+    pub static TEXTURE: Component<Text, Item> = Component::named(c::BUCKET_TEXTURE);
+}
+
 /// An item's own (`abi::comp::item`), besides the shared ones (`component::MAX_STACK`..).
 pub mod item {
     use crate::abi::comp::item as i;
@@ -496,6 +507,8 @@ pub mod item {
     pub static ON_RELEASE: Component<crate::abi::Callback, Item> = Component::named(i::ON_RELEASE);
     pub static ON_ATTACK: Component<crate::abi::Callback, Item> = Component::named(i::ON_ATTACK);
     pub static CONDITION: Component<crate::abi::Callback, Item> = Component::named(i::CONDITION);
+    /// Marks this item as a reusable, stack-component-backed liquid bucket.
+    pub static BUCKET: crate::Tag<Item> = crate::Tag::named(i::BUCKET);
 }
 
 /// A biome's own climate and surface (`abi::comp::biome`), what terrain rules placing it start

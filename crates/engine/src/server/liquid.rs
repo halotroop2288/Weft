@@ -14,6 +14,17 @@ use crate::world::DIRS;
 /// North, east, south, west: vanilla's horizontal order, which decides ties.
 const HORIZONTAL: [IVec3; 4] = [IVec3::new(0, 0, -1), IVec3::new(1, 0, 0), IVec3::new(0, 0, 1), IVec3::new(-1, 0, 0)];
 
+const BUCKET_CAPACITY: u32 = 1000;
+const MILLIBUCKETS_PER_LEVEL: u32 = 125;
+
+fn bucket_fill_levels(stored_mb: u32, available_levels: u32) -> u32 {
+    available_levels.min(BUCKET_CAPACITY.saturating_sub(stored_mb) / MILLIBUCKETS_PER_LEVEL)
+}
+
+fn bucket_pour_levels(stored_mb: u32, existing_levels: u32) -> u32 {
+    (stored_mb / MILLIBUCKETS_PER_LEVEL).min(8u32.saturating_sub(existing_levels))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Fluid {
     id: u16,
@@ -69,7 +80,23 @@ fn equalize_levels(center: &mut u32, levels: &mut [i32; 4], order: [usize; 4], f
 
 #[cfg(test)]
 mod tests {
-    use super::{can_mix_by_density_and_volume, equalize_levels, has_liquid_capacity, split_volume};
+    use super::{
+        bucket_fill_levels, bucket_pour_levels, can_mix_by_density_and_volume, equalize_levels, has_liquid_capacity, split_volume,
+    };
+
+    #[test]
+    fn bucket_fills_only_to_its_remaining_capacity() {
+        assert_eq!(bucket_fill_levels(0, 3), 3);
+        assert_eq!(bucket_fill_levels(875, 8), 1);
+        assert_eq!(bucket_fill_levels(1000, 8), 0);
+    }
+
+    #[test]
+    fn bucket_pours_only_into_available_cell_capacity() {
+        assert_eq!(bucket_pour_levels(375, 6), 2);
+        assert_eq!(bucket_pour_levels(1000, 3), 5);
+        assert_eq!(bucket_pour_levels(100, 0), 0);
+    }
 
     #[test]
     fn gravity_caps_destination_and_keeps_overflow() {
@@ -92,7 +119,7 @@ mod tests {
     fn equalization_ignores_unavailable_neighbors() {
         let mut center = 5;
         let mut levels = [-1, 0, -1, 1];
-        equalize_levels(&mut center, &mut levels, [0, 1, 2, 3]);
+        equalize_levels(&mut center, &mut levels, [0, 1, 2, 3], 0);
         assert_eq!(
             center
                 + levels
@@ -110,7 +137,7 @@ mod tests {
     fn one_open_neighbor_can_receive_the_whole_cell() {
         let mut center = 8;
         let mut levels = [-1, 0, -1, -1];
-        equalize_levels(&mut center, &mut levels, [0, 1, 2, 3]);
+        equalize_levels(&mut center, &mut levels, [0, 1, 2, 3], 0);
         assert_eq!(center, 1);
         assert_eq!(levels, [-1, 7, -1, -1]);
     }
@@ -584,101 +611,136 @@ impl Dim {
         self.schedule(space_id, p, def.delay);
     }
 
-    /// Bucket logic for `player` holding `held`: pour a liquid item, or fill an empty container
-    /// from a source it looks at. The new held stack, or `None` if nothing happened.
+    /// Transfer liquid between a stack-backed bucket and the targeted cell. Ordinary use fills;
+    /// sneaking use pours. The new held stack, or `None` if nothing changed.
     pub fn use_container(&mut self, space_id: u64, c: &'static Content, player: u64, held: ItemStack) -> Option<ItemStack> {
         if held.is_empty() {
             return None;
         }
-        let liquid = c.item_liquid.get(&held.item).copied();
-        let reach = self.block_reach(space_id, c, player);
-        let flags = if liquid.is_none() { crate::physics::LIQUID_SOURCES } else { weft_abi::ray::BLOCKS };
-        let hit = self.look_ray(space_id, c, player, reach, flags)?;
-        self.with_space(c, hit.frame, |region, _, _| region.use_container_at(c, player, held, hit, liquid))?
-    }
-
-    fn use_container_at(
-        &mut self,
-        c: &'static Content,
-        player: u64,
-        held: ItemStack,
-        hit: crate::physics::Hit,
-        liquid: Option<(u16, u32)>,
-    ) -> Option<ItemStack> {
-        let space_id = hit.frame;
-        let creative = self
-            .entities
-            .get(player)
-            .is_some_and(|e| e.mode.has(crate::tag_bits::game_mode::NO_COSTS));
-        if let Some((l, empty)) = liquid {
-            let source = c.liquids[l as usize].first_state;
-            // Into what holds liquid, with the same say as placing a block.
-            if c.states[hit.state as usize].liquid.is_none()
-                && self.fluid(space_id, c, hit.block).is_none()
-                && self.can_hold_liquid(space_id, c, hit.block, source)
-            {
-                let mut q = weft_abi::Query {
-                    entity: player,
-                    pos: hit.block.to_array().into(),
-                    state: source,
-                    item: held.item,
-                    ..weft_abi::Query::DEFAULT
-                };
-                if !self.ask(space_id, c, weft_abi::action::PLACE_BLOCK, &mut q) || !self.add_part(space_id, c, hit.block, source) {
-                    return None;
-                }
-                return Some(if creative || empty == 0 { held } else { ItemStack::new(empty, 1) });
-            }
-            let replaceable = |s: u32| c.states[s as usize].flags & bf::REPLACEABLE != 0;
-            let target = if replaceable(hit.state) { hit.block } else { hit.block + DIRS[hit.face as usize] };
-            let old = self.get(space_id, target).filter(|&s| replaceable(s))?;
-            // Only into what would become a source, and with the same say as placing a block.
-            if old == source {
-                return None;
-            }
-            let mut q = weft_abi::Query {
-                entity: player,
-                pos: target.to_array().into(),
-                state: source,
-                item: held.item,
-                ..weft_abi::Query::DEFAULT
-            };
-            if !self.ask(space_id, c, weft_abi::action::PLACE_BLOCK, &mut q) {
-                return None;
-            }
-            if c.states[old as usize].liquid.is_some() {
-                self.set(space_id, c, target, source)?;
-            } else {
-                self.spread_to(space_id, c, target, source)?;
-            }
-            return Some(if creative || empty == 0 { held } else { ItemStack::new(empty, 1) });
-        }
-        let f = decode(c, hit.state).filter(|f| f.source)?;
-        let filled = *c.containers.get(&(held.item, f.id))?;
-        let mut q = weft_abi::Query {
-            entity: player,
-            pos: hit.block.to_array().into(),
-            state: hit.state,
-            item: held.item,
-            ..weft_abi::Query::DEFAULT
-        };
-        if !self.ask(space_id, c, weft_abi::action::BREAK_BLOCK, &mut q) || !self.replace_part(space_id, c, hit.block, hit.state, AIR) {
+        let marker = c.components.id(weft_abi::comp::item::BUCKET)?;
+        if !c.components.has(crate::components::ITEM, held.item, marker) {
             return None;
         }
-        if creative {
-            return Some(held);
+        let reach = self.block_reach(space_id, c, player);
+        let flags = weft_abi::ray::BLOCKS | weft_abi::ray::LIQUIDS;
+        let hit = self.look_ray(space_id, c, player, reach, flags)?;
+        self.with_space(c, hit.frame, |region, _, _| region.use_bucket_at(c, player, held, hit))?
+    }
+
+    fn use_bucket_at(&mut self, c: &'static Content, player: u64, held: ItemStack, hit: crate::physics::Hit) -> Option<ItemStack> {
+        let space_id = hit.frame;
+        let maybe_player = self.entities.get(player);
+        let creative = maybe_player.is_some_and(|e| e.mode.has(crate::tag_bits::game_mode::NO_COSTS));
+        let sneak = maybe_player.is_some_and(|e| e.pose.eq(&crate::world::Pose::CROUCH));
+        let liquid_component = c.components.id(weft_abi::comp::BUCKET_LIQUID)?;
+        let amount_component = c.components.id(weft_abi::comp::BUCKET_AMOUNT)?;
+        let texture_component = c.components.id(weft_abi::comp::BUCKET_TEXTURE)?;
+        let stored_liquid = crate::stack::value(held.data, liquid_component)
+            .filter(|b| b.len() >= 4)
+            .map(|b| u32::from_le_bytes(b[..4].try_into().unwrap()) as u16);
+        let stored_amount = crate::stack::u32_of(&held, Some(amount_component)).min(BUCKET_CAPACITY);
+
+        let set_contents = |stack: ItemStack, liquid: Option<u16>, amount: u32, texture: Option<&str>| {
+            let mut data = stack.data;
+            if let Some(liquid) = liquid {
+                data = crate::stack::with(data, liquid_component, Some(&(liquid as u32).to_le_bytes()));
+            } else {
+                data = crate::stack::with(data, liquid_component, None);
+            }
+            if amount == 0 {
+                data = crate::stack::with(data, amount_component, None);
+                data = crate::stack::with(data, texture_component, None);
+            } else {
+                data = crate::stack::with(data, amount_component, Some(&amount.to_le_bytes()));
+                let mut bytes = Vec::new();
+                weft_abi::data::write_text(texture.unwrap_or_default(), &mut bytes);
+                data = crate::stack::with(data, texture_component, Some(&bytes));
+            }
+            ItemStack { data, ..stack }
+        };
+
+        if !sneak {
+            if stored_amount >= BUCKET_CAPACITY {
+                return None;
+            }
+            let fluids = self.fluids(space_id, c, hit.block);
+            let fluid = if stored_amount > 0 {
+                fluids
+                    .into_iter()
+                    .find(|fluid| Some(fluid.id) == stored_liquid)?
+            } else {
+                fluids
+                    .into_iter()
+                    .min_by_key(|fluid| (c.liquids[fluid.id as usize].density, fluid.amount, fluid.id))?
+            };
+            let levels = bucket_fill_levels(stored_amount, fluid.amount);
+            if levels == 0 {
+                return None;
+            }
+            let state = encode(&c.liquids[fluid.id as usize], fluid.amount);
+            let mut q =
+                weft_abi::Query { entity: player, pos: hit.block.to_array().into(), state, item: held.item, ..weft_abi::Query::DEFAULT };
+            if !self.ask(space_id, c, weft_abi::action::BREAK_BLOCK, &mut q) {
+                return None;
+            }
+            if !creative {
+                let remaining = fluid.amount - levels;
+                let next = if remaining == 0 { AIR } else { encode(&c.liquids[fluid.id as usize], remaining) };
+                if !self.replace_part(space_id, c, hit.block, state, next) {
+                    return None;
+                }
+                self.sort_liquid_parts(space_id, c, hit.block);
+            }
+            let texture = &c.liquids[fluid.id as usize].bucket_texture;
+            return Some(set_contents(held, Some(fluid.id), stored_amount + levels * MILLIBUCKETS_PER_LEVEL, Some(texture.as_str())));
         }
-        if held.count == 1 {
-            return Some(ItemStack::new(filled, 1));
+
+        let liquid = stored_liquid?;
+        if stored_amount == 0 {
+            return None;
         }
-        let rest = self
-            .entities
-            .insert_item(c, player, ItemStack::new(filled, 1));
-        if !rest.is_empty() {
-            let pos = self.entities.get(player).map_or(DVec3::ZERO, |e| e.pos);
-            self.spawn_item(0, c, pos, rest);
+        let replaceable = |state: u32| c.states[state as usize].flags & bf::REPLACEABLE != 0;
+        let target = if c.states[hit.state as usize].liquid.is_some() || replaceable(hit.state) {
+            hit.block
+        } else {
+            hit.block + DIRS[hit.face as usize]
+        };
+        if !self.can_hold_liquid(space_id, c, target, c.liquids[liquid as usize].first_state) {
+            return None;
         }
-        Some(ItemStack { count: held.count - 1, ..held })
+        let existing = self.fluids(space_id, c, target);
+        let used_levels = bucket_pour_levels(stored_amount, existing.iter().map(|f| f.amount).sum());
+        if used_levels == 0 {
+            return None;
+        }
+        let incoming = Fluid { id: liquid, amount: used_levels, source: used_levels == 8 };
+        if existing
+            .iter()
+            .any(|other| !self.can_mix(c, incoming, *other))
+        {
+            return None;
+        }
+        let state = encode(&c.liquids[liquid as usize], used_levels);
+        let mut q = weft_abi::Query { entity: player, pos: target.to_array().into(), state, item: held.item, ..weft_abi::Query::DEFAULT };
+        if !self.ask(space_id, c, weft_abi::action::PLACE_BLOCK, &mut q) {
+            return None;
+        }
+        if let Some(old) = existing.iter().find(|f| f.id == liquid).copied() {
+            let next = encode(&c.liquids[liquid as usize], old.amount + used_levels);
+            if !self.replace_part(space_id, c, target, encode(&c.liquids[liquid as usize], old.amount), next) {
+                return None;
+            }
+        } else if !self.add_part(space_id, c, target, state) {
+            return None;
+        }
+        self.sort_liquid_parts(space_id, c, target);
+        let remaining = if creative { stored_amount } else { stored_amount - used_levels * MILLIBUCKETS_PER_LEVEL };
+        Some(set_contents(
+            held,
+            (remaining > 0).then_some(liquid),
+            remaining,
+            (remaining > 0).then(|| crate::stack::text(held, weft_abi::comp::BUCKET_TEXTURE).unwrap_or_default()),
+        ))
     }
 
     /// The block an entity looks at from its eyes, in the world or a moving structure.

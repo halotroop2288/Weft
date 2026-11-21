@@ -1108,6 +1108,8 @@ pub mod comp {
         pub const RENEWABLE: &str = "liquid.renewable";
         pub const DENSITY: &str = "liquid.density";
         pub const HEAT: &str = "liquid.heat";
+        /// Texture shown on a bucket containing this liquid.
+        pub const BUCKET_TEXTURE: &str = "liquid.bucket_texture";
     }
 
     /// What happens where two liquids meet (`entry_kind::REACTION`): when `LIQUID` (`match`) has
@@ -1193,6 +1195,8 @@ pub mod comp {
     /// (`callback`, `ItemModelArgs`: how a stack looks by what is in it, asked once per kind of
     /// stack).
     pub mod item {
+        /// This item is a reusable bucket whose contents are stored per stack.
+        pub const BUCKET: &str = "item.bucket";
         /// Explicit model asset, including its `item/` folder. Defaults to the item's own name.
         pub const MODEL_FILE: &str = "item.model_file";
         pub const BLOCK: &str = "item.block";
@@ -1609,9 +1613,12 @@ pub mod comp {
     pub const WORN_TEXTURE: &str = "worn_texture";
     /// Biome: what falls there (`str`, a precipitation's name); without it rain.
     pub const PRECIPITATION: &str = "precipitation";
-    /// Item: the liquid (block name, `str`) it holds; with `remainder` (the empty container's
-    /// name) the engine fills and empties it like a bucket.
+    /// Legacy fixed item-liquid mapping. New buckets use the per-stack `BUCKET_*` components.
     pub const LIQUID: &str = "liquid";
+    /// Per-stack bucket contents.
+    pub const BUCKET_LIQUID: &str = "bucket.liquid";
+    pub const BUCKET_AMOUNT: &str = "bucket.amount";
+    pub const BUCKET_TEXTURE: &str = "bucket.texture";
     /// Item left behind when this one is used up (fuel, crafting, pouring): `item`.
     pub const REMAINDER: &str = "remainder";
     /// Entity kinds and blocks: shaded by `shaders/entity/<name>.wgsl` or `shaders/block/<name>.wgsl`

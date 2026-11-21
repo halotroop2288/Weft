@@ -2735,6 +2735,11 @@ crate::entry::entry_builder!(
 );
 
 impl ItemBuilder<'_> {
+    /// Marks this item as a reusable bucket. Its liquid, texture, and millibucket amount are stored per stack.
+    pub fn bucket(self) -> Self {
+        self.tag(crate::abi::comp::item::BUCKET).max_stack(1)
+    }
+
     /// A model asset, including its folder (`mod:item/model`).
     pub fn model_file(self, model: &str) -> Self {
         self.set_text(&crate::comps::item::MODEL_FILE, &crate::full_name(model))
@@ -3787,7 +3792,6 @@ pub struct LiquidBuilder<'a> {
     e: crate::entry::Entry,
     block: &'static Block,
     look: Option<BlockLook>,
-    bucket: Option<(&'static Item, String, String)>,
 }
 
 impl LiquidBuilder<'_> {
@@ -3821,6 +3825,10 @@ impl LiquidBuilder<'_> {
     /// Roughly Kelvin; 1000 and more burns what touches it.
     pub fn heat(self, t: u32) -> Self {
         self.set(&crate::comps::liquid::HEAT, t)
+    }
+    /// Texture used for a bucket containing this liquid. Relative names are under item/.
+    pub fn bucket_texture(self, texture: &str) -> Self {
+        self.set_text(&crate::comps::liquid::BUCKET_TEXTURE, &crate::asset("item", texture))
     }
     /// A camera environment preset: color (0xRRGGBB), start and end in blocks.
     /// Defaults to the average texture color, start -8 and end 96. Acoustics are independent.
@@ -3860,13 +3868,6 @@ impl LiquidBuilder<'_> {
                 .replace_overlays(),
         )
     }
-    /// Also registers `item`: `empty` (a container item, any mod's) filled with this liquid, in
-    /// creative tab `tab` (any mod's). The engine fills and pours it; no code needed.
-    pub fn bucket(mut self, item: &'static Item, empty: &Item, tab: &CreativeTab) -> Self {
-        self.bucket = Some((item, empty.name().to_string(), tab_tag(tab)));
-        self
-    }
-
     /// Its block and item: registered with a new liquid, edited where `.block(..)` says so.
     fn finish(&mut self) {
         if std::thread::panicking() {
@@ -3913,14 +3914,6 @@ impl LiquidBuilder<'_> {
             };
             it.e.ops.extend(tags);
         }
-        if let Some((item, empty, tab)) = self.bucket.take() {
-            self.reg
-                .item(item)
-                .max_stack(1)
-                .set_text(&c::LIQUID, &name)
-                .set_text(&c::REMAINDER, &empty)
-                .tag(&tab);
-        }
     }
 }
 
@@ -3959,12 +3952,12 @@ impl Registry {
     /// A liquid the engine flows; see `LiquidBuilder`. Defaults are vanilla water's numbers, an
     /// average of its texture for the fog's color.
     pub fn liquid(&mut self, liquid: &'static Block) -> LiquidBuilder<'_> {
-        LiquidBuilder { e: crate::entry::Entry::of(liquid.liquid()), reg: self, block: liquid, look: None, bucket: None }
+        LiquidBuilder { e: crate::entry::Entry::of(liquid.liquid()), reg: self, block: liquid, look: None }
     }
 
     fn liquid_entry(&mut self, liquid: &'static Liquid) -> LiquidBuilder<'_> {
         let block = Block::generated(liquid.name().to_string());
-        LiquidBuilder { e: crate::entry::Entry::of(liquid), reg: self, block, look: None, bucket: None }
+        LiquidBuilder { e: crate::entry::Entry::of(liquid), reg: self, block, look: None }
     }
 
     /// When liquid `liquid` touches `touching` (block matchers), see `ReactionBuilder`.

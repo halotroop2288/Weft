@@ -45,11 +45,9 @@ static VENT: Block = Block::named("vent");
 static REINFORCED_STONE: Block = Block::named("reinforced_stone");
 static STEEL_PICKAXE: Item = Item::named("steel_pickaxe");
 static OIL: Block = Block::named("oil");
-static OIL_BUCKET: Item = Item::named("oil_bucket");
 static MACHINES: SoundCategory = SoundCategory::named("machines");
 static ENERGY_GIZMOS: GizmoGroup = GizmoGroup::named("energy");
 // The base game's things, by name: no code dependency on it.
-static BUCKET: Item = Item::named("base:bucket");
 use base_api::tabs::{BUILDING as BASE_BUILDING, TOOLS as BASE_TOOLS};
 static TORCH: Block = Block::named("torch");
 static GENERATOR_MENU: Menu = Menu::named("generator");
@@ -511,14 +509,14 @@ fn init(r: &mut Registry) {
         .tilt(-15.0)
         .color(0xFFD0B0);
 
-    // A liquid of its own, flowing by the engine's rules; its bucket fills from the base game's.
+    // A liquid of its own, flowing by the engine's rules; the base bucket stores its contents.
     r.liquid(&OIL)
         .block(|b| b.light_opacity(4).drag(0.4).tag("oil"))
         .density(800)
         .flow_delay(15)
         .drop_off(2)
         .slope_find(3)
-        .bucket(&OIL_BUCKET, &BUCKET, &BASE_TOOLS);
+        .bucket_texture("oil_bucket");
 
     // Healing food without touching the base game's eating code: any used item that heals (its
     // apple).

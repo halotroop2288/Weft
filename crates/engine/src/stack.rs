@@ -102,6 +102,9 @@ pub fn embedded(stack: &ItemStack) -> Vec<weft_abi::EmbeddedProjectile> {
 /// `None`: the item's icon.
 pub fn layers(stack: &ItemStack) -> Option<&'static str> {
     let c = crate::content::try_content()?;
+    if let Some(texture) = text(*stack, weft_abi::comp::BUCKET_TEXTURE).filter(|s| !s.trim().is_empty()) {
+        return Some(texture);
+    }
     c.ids
         .layers
         .filter(|&id| value(stack.data, id).is_some())

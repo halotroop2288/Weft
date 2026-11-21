@@ -708,6 +708,8 @@ pub struct LiquidDef {
     /// Lighter than air: flows up.
     pub rises: bool,
     pub temperature: u32,
+    /// Item texture used by a bucket while it contains this liquid.
+    pub bucket_texture: String,
     pub environment: Vec<abi::environment::EnvironmentLayer>,
     /// Reactions which turn a block touched by this falling liquid into a result state.
     /// Each entry is (matcher for the touched block, result state).
@@ -1073,10 +1075,6 @@ pub struct Content {
     pub creative_tabs: Vec<CreativeTab>,
     pub game: crate::registry::Game,
     pub liquids: Vec<LiquidDef>,
-    /// Item -> (liquid it holds, the empty container left after pouring).
-    pub item_liquid: FxHashMap<u32, (u16, u32)>,
-    /// (empty container, liquid) -> filled item.
-    pub containers: FxHashMap<(u32, u16), u32>,
     /// Each liquid's item (`comp::FLUID`), by liquid; 0 for one without.
     pub fluid_items: Vec<u32>,
     /// Item -> the liquid it is.
@@ -2091,7 +2089,6 @@ pub fn freeze(
             shares_cell.insert(block, m);
         }
     }
-    let (item_liquid, containers) = item_containers(&item_defs, &liquids, &components, &mut errors);
     let (fluid_items, item_fluid) = fluid_items(&item_defs, &liquids, &components, &mut errors);
     let tabs = entries_of(&mut games, abi::entry_kind::CREATIVE_TAB);
     let creative_tabs = creative_tabs(&mods, tabs, &item_defs, &item_names, &components, &mut tables, &mod_name, &mut errors);
@@ -2278,10 +2275,8 @@ pub fn freeze(
         void_dim,
         game,
         liquids,
-        item_liquid,
         fluid_items,
         item_fluid,
-        containers,
         loot,
         stack_flags,
         damage_immune,
@@ -3498,30 +3493,6 @@ fn fluid_items(
     (by_liquid, of_item)
 }
 
-fn item_containers(
-    item_defs: &[ItemDef],
-    liquids: &[LiquidDef],
-    components: &Components,
-    errors: &mut Vec<String>,
-) -> (FxHashMap<u32, (u16, u32)>, FxHashMap<(u32, u16), u32>) {
-    let (mut item_liquid, mut containers) = (FxHashMap::default(), FxHashMap::default());
-    if let (Some(lc), Some(rc)) = (components.id(abi::comp::LIQUID), components.id(abi::comp::REMAINDER)) {
-        for i in 1..item_defs.len() as u32 {
-            let Some(liquid) = components.text(comps::ITEM, i, lc) else { continue };
-            let Some(l) = liquids.iter().position(|d| d.name == liquid) else {
-                errors.push(format!("item {} holds unknown liquid {liquid}", item_defs[i as usize].name));
-                continue;
-            };
-            let empty = components.get::<u32>(comps::ITEM, i, rc).unwrap_or(0);
-            item_liquid.insert(i, (l as u16, empty));
-            if empty != 0 {
-                containers.insert((empty, l as u16), i);
-            }
-        }
-    }
-    (item_liquid, containers)
-}
-
 /// Every state's rules (`blocks::Blocks::rules`) with their conditions and what they become
 /// resolved: `into` sets properties of the state (`age=0`) or names a block (`base:dirt`).
 fn resolve_rules(
@@ -3983,6 +3954,7 @@ fn freeze_liquids(
                 density,
                 rises: density < 0,
                 temperature: e.or(l::HEAT, 300),
+                bucket_texture: e.text(l::BUCKET_TEXTURE).unwrap_or_default().to_string(),
                 environment,
                 falls_into: Vec::new(),
                 reacts_with: Vec::new(),
