@@ -1108,6 +1108,8 @@ pub mod comp {
         pub const RENEWABLE: &str = "liquid.renewable";
         pub const DENSITY: &str = "liquid.density";
         pub const HEAT: &str = "liquid.heat";
+        /// Texture shown on a bucket containing this liquid.
+        pub const BUCKET_TEXTURE: &str = "liquid.bucket_texture";
     }
 
     /// What happens where two liquids meet (`entry_kind::REACTION`): when `LIQUID` (`match`) has
