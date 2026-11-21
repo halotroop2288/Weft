@@ -43,6 +43,7 @@ impl Server {
         face: u8,
         look: [f32; 3],
         hit: [f32; 3],
+        sneak: bool,
     ) -> bool {
         let Some((r, entity)) = self.region(pi) else { return false };
         let Some(e) = r.entities.get(entity) else { return false };
@@ -56,7 +57,7 @@ impl Server {
             .and_then(|i| i.block)
             .filter(|_| !held.is_empty() && !no_place)
         else {
-            return self.use_in_hand(c, pi, slot, frame, Some((pos, face)));
+            return self.use_in_hand(c, pi, slot, frame, Some((pos, face)), sneak);
         };
         let placed = r.with_space(c, frame, |d, space_id, o| {
             let hit = hit.map(|v| v.clamp(0.0, 1.0));
@@ -77,7 +78,7 @@ impl Server {
         });
         // Where it can't be placed, it is used like any item (a seed's own use, a bucket of it).
         if !matches!(placed, Some(Some(()))) {
-            return self.use_in_hand(c, pi, slot, frame, Some((pos, face)));
+            return self.use_in_hand(c, pi, slot, frame, Some((pos, face)), sneak);
         }
         if !creative {
             r.entities
@@ -93,10 +94,10 @@ impl Server {
 
     /// Player `pi` uses the item in `slot` on what was clicked: true if it did something, or
     /// started to.
-    fn use_in_hand(&mut self, c: &'static Content, pi: usize, slot: u32, frame: u64, target: Option<(IVec3, u8)>) -> bool {
+    fn use_in_hand(&mut self, c: &'static Content, pi: usize, slot: u32, frame: u64, target: Option<(IVec3, u8)>, sneak: bool) -> bool {
         let Some((region, entity)) = self.region(pi) else { return false };
         region
-            .with_space(c, frame, |region, space_id, _| region.use_in_hand(space_id, c, entity, slot, target, false))
+            .with_space(c, frame, |region, space_id, _| region.use_in_hand(space_id, c, entity, slot, target, false, sneak))
             .unwrap_or(false)
     }
 
@@ -396,7 +397,7 @@ impl Server {
                     }
                     Some(Some(false)) => {
                         for slot in self.hands(c, pi) {
-                            if self.place_or_use(c, pi, slot, frame, pos, part, face, look, hit) {
+                            if self.place_or_use(c, pi, slot, frame, pos, part, face, look, hit, sneak) {
                                 break;
                             }
                         }
@@ -406,8 +407,12 @@ impl Server {
             }
 
             ToServer::UseItem => {
+                let sneak = self
+                    .region(pi)
+                    .and_then(|(r, entity)| r.entities.get(entity))
+                    .is_some_and(|e| e.pose == crate::world::Pose::CROUCH);
                 for slot in self.hands(c, pi) {
-                    if self.use_in_hand(c, pi, slot, 0, None) {
+                    if self.use_in_hand(c, pi, slot, 0, None, sneak) {
                         break;
                     }
                 }
@@ -502,8 +507,12 @@ impl Server {
                         .conn
                         .send(ToClient::Swing { used_item: false, off_hand: false });
                 } else {
+                    let sneak = self
+                        .region(pi)
+                        .and_then(|(r, entity)| r.entities.get(entity))
+                        .is_some_and(|e| e.pose == crate::world::Pose::CROUCH);
                     for slot in self.hands(c, pi) {
-                        if self.use_in_hand(c, pi, slot, 0, None) {
+                        if self.use_in_hand(c, pi, slot, 0, None, sneak) {
                             break;
                         }
                     }
@@ -801,6 +810,7 @@ impl Dim {
         slot: u32,
         target: Option<(IVec3, u8)>,
         finishing: bool,
+        sneak: bool,
     ) -> bool {
         let Some(e) = self.entities.get(entity) else { return false };
         let off_hand = c.game.entities[e.kind as usize].off == Some(slot);
@@ -876,7 +886,7 @@ impl Dim {
             }
             used = true;
         } else if def.on_use.is_none() {
-            if let Some(after) = self.use_container(space_id, c, entity, held) {
+            if let Some(after) = self.use_container(space_id, c, entity, held, target, sneak) {
                 if after != held {
                     self.entities.set_slot(entity, slot, after);
                 }
@@ -962,7 +972,11 @@ impl Dim {
                 self.stop_using(id);
             } else if left <= 1 {
                 self.stop_using(id);
-                self.use_in_hand(space_id, c, id, slot, None, true);
+                let sneak = self
+                    .entities
+                    .get(id)
+                    .is_some_and(|e| e.pose == crate::world::Pose::CROUCH);
+                self.use_in_hand(space_id, c, id, slot, None, true, sneak);
             } else if let Some(e) = self.entities.get_mut(id) {
                 e.use_done = Some((item, left - 1, slot));
             }

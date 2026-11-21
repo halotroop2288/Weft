@@ -333,51 +333,96 @@ fn can_replace(c: &Content, s: &SlotRef, old: ItemStack, new: ItemStack) -> bool
     (old.is_empty() || takeable(s)) && (new.is_empty() || s.flags & sf::OUTPUT == 0) && fits(c, s, new.item) && new.count <= cap(c, s, &new)
 }
 
-/// What a bucket holds.
+/// Millibuckets held by a bucket or a liquid inventory slot.
 const CONTAINER_MB: u32 = 1000;
 
-/// A click on a liquid slot with a container on the cursor: a full one pours into it, an empty
-/// one fills from it, a bucket at a time.
+/// A click on a liquid slot transfers contents to or from a stack-backed bucket.
 fn liquid_click(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, slot: u32) {
     let (Some(s), cursor) = (m.slots.get(slot as usize).copied(), m.cursor) else { return };
-    if cursor.is_empty() || s.flags & sf::LOCKED != 0 {
+    if cursor.is_empty() || s.flags & sf::LOCKED != 0 || cursor.count == 0 {
         return;
     }
+
+    let Some(bucket_marker) = c.components.id(weft_abi::comp::item::BUCKET) else { return };
+    if !c
+        .components
+        .has(crate::components::ITEM, cursor.item, bucket_marker)
+    {
+        return;
+    }
+    let (Some(liquid_comp), Some(amount_comp), Some(texture_comp)) = (
+        c.components.id(weft_abi::comp::BUCKET_LIQUID),
+        c.components.id(weft_abi::comp::BUCKET_AMOUNT),
+        c.components.id(weft_abi::comp::BUCKET_TEXTURE),
+    ) else {
+        return;
+    };
+
     let here = get(m, dim, player, slot);
     let capacity = if s.group.limit > 0 { s.group.limit } else { CONTAINER_MB };
-    let (new_slot, new_cursor) = if let Some(&(l, empty)) = c.item_liquid.get(&cursor.item) {
-        // Full containers don't stack; one at a time.
-        if cursor.count != 1 || s.flags & sf::OUTPUT != 0 {
-            return;
-        }
-        let fluid = c.fluid_items.get(l as usize).copied().unwrap_or(0);
-        if fluid == 0 || !fits(c, &s, fluid) || (!here.is_empty() && here.item != fluid) || here.count + CONTAINER_MB > capacity {
-            return;
-        }
-        let poured = ItemStack { item: fluid, count: here.count + CONTAINER_MB, ..here };
-        (poured, if empty == 0 { ItemStack::EMPTY } else { ItemStack::new(empty, 1) })
-    } else {
-        let Some(&l) = c.item_fluid.get(&here.item) else { return };
-        let Some(&filled) = c.containers.get(&(cursor.item, l)) else { return };
-        if here.count < CONTAINER_MB {
-            return;
-        }
-        let left = here.count - CONTAINER_MB;
-        let rest = if left == 0 { ItemStack::EMPTY } else { ItemStack { count: left, ..here } };
-        if cursor.count == 1 {
-            (rest, ItemStack::new(filled, 1))
+    let stored_liquid = crate::stack::value(cursor.data, liquid_comp)
+        .filter(|bytes| bytes.len() >= 4)
+        .map(|bytes| u32::from_le_bytes(bytes[..4].try_into().unwrap()) as u16);
+    let stored_amount = crate::stack::u32_of(&cursor, Some(amount_comp)).min(CONTAINER_MB);
+
+    let update_bucket = |liquid: Option<u16>, amount: u32, texture: Option<&str>| {
+        let mut data = cursor.data;
+        if let Some(liquid) = liquid {
+            data = crate::stack::with(data, liquid_comp, Some(&(liquid as u32).to_le_bytes()));
         } else {
-            // One of a stack of empty ones: the full one goes into the inventory.
-            if !dim
-                .entities
-                .insert_item(c, player, ItemStack::new(filled, 1))
-                .is_empty()
-            {
+            data = crate::stack::with(data, liquid_comp, None);
+        }
+        if amount == 0 {
+            data = crate::stack::with(data, amount_comp, None);
+            data = crate::stack::with(data, texture_comp, None);
+        } else {
+            data = crate::stack::with(data, amount_comp, Some(&amount.to_le_bytes()));
+            let mut bytes = Vec::new();
+            weft_abi::data::write_text(texture.unwrap_or_default(), &mut bytes);
+            data = crate::stack::with(data, texture_comp, Some(&bytes));
+        }
+        ItemStack { data, ..cursor }
+    };
+
+    let (new_slot, new_cursor) = if stored_amount > 0 {
+        if cursor.count != 1 {
+            return;
+        }
+        let Some(liquid) = stored_liquid else { return };
+        let Some(&fluid_item) = c.fluid_items.get(liquid as usize) else { return };
+        if fluid_item == 0 || !fits(c, &s, fluid_item) || (!here.is_empty() && here.item != fluid_item) {
+            return;
+        }
+        let room = capacity.saturating_sub(here.count);
+        let transferred = stored_amount.min(room);
+        if transferred == 0 {
+            return;
+        }
+        let next_slot = ItemStack { item: fluid_item, count: here.count + transferred, ..here };
+        let remaining = stored_amount - transferred;
+        let texture = crate::stack::text(cursor, weft_abi::comp::BUCKET_TEXTURE);
+        (next_slot, update_bucket((remaining > 0).then_some(liquid), remaining, texture))
+    } else {
+        let Some(&liquid) = c.item_fluid.get(&here.item) else { return };
+        if here.is_empty() || here.count == 0 {
+            return;
+        }
+        let transferred = here.count.min(CONTAINER_MB);
+        let Some(liquid_def) = c.liquids.get(liquid as usize) else { return };
+        let texture = liquid_def.bucket_texture.as_str();
+        let remaining = here.count - transferred;
+        let next_slot = if remaining == 0 { ItemStack::EMPTY } else { ItemStack { count: remaining, ..here } };
+        let filled = ItemStack { count: 1, ..update_bucket(Some(liquid), transferred, Some(texture)) };
+        if cursor.count == 1 {
+            (next_slot, filled)
+        } else {
+            if !dim.entities.insert_item(c, player, filled).is_empty() {
                 return;
             }
-            (rest, ItemStack { count: cursor.count - 1, ..cursor })
+            (next_slot, ItemStack { count: cursor.count - 1, ..cursor })
         }
     };
+
     let taken = new_slot.count < here.count;
     set(m, dim, player, slot, new_slot);
     m.cursor = new_cursor;

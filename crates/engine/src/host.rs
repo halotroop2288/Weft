@@ -1000,7 +1000,8 @@ unsafe extern "C" fn entity_use_item(w: *mut abi::WorldCtx, id: u64, off: u32, t
         let main = !crate::content::in_main_hand(c, e.kind, inv, e.selected).is_empty();
         let slot = if off != 0 { c.game.entities[e.kind as usize].off } else { main.then_some(e.selected) };
         let target = (!target.is_null()).then(|| (ip(target), face.min(5) as u8));
-        slot.is_some_and(|slot| d.use_in_hand(space_id(w), c, id, slot, target, false)) as u32
+        let sneak = e.pose == crate::world::Pose::CROUCH;
+        slot.is_some_and(|slot| d.use_in_hand(space_id(w), c, id, slot, target, false, sneak)) as u32
     }
 }
 
@@ -2029,7 +2030,12 @@ unsafe extern "C" fn liquid_of(state: u32) -> u32 {
 
 unsafe extern "C" fn use_container(w: *mut abi::WorldCtx, player: u64, stack: ItemStack, handled: *mut u32) -> ItemStack {
     unsafe {
-        let r = dim(w).use_container(space_id(w), content(), player, stack);
+        let d = dim(w);
+        let sneak = d
+            .entities
+            .get(player)
+            .is_some_and(|e| e.pose == crate::world::Pose::CROUCH);
+        let r = d.use_container(space_id(w), content(), player, stack, None, sneak);
         if !handled.is_null() {
             *handled = r.is_some() as u32;
         }

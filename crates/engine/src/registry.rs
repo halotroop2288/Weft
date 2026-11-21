@@ -756,7 +756,18 @@ fn engine_components() -> Vec<RawEntry> {
     let energy = (<abi::Energy as abi::Schema>::SCHEMA, cf::SAVE | cf::SYNC_MENU, vec![0; size_of::<abi::Energy>()]);
     // What items, entity kinds, poses and entity effects give (`content::SourceMods`).
     let modifiers = <Vec<abi::Modifier> as abi::data::Data>::schema();
-    let mut all = vec![decl(abi::comp::CONTENTS, "bytes"), decl(abi::comp::LAYERS, "str"), decl(abi::comp::MODIFIERS, &modifiers)];
+    let mut all = vec![
+        decl(abi::comp::CONTENTS, "bytes"),
+        decl(abi::comp::LAYERS, "str"),
+        decl(abi::comp::MODIFIERS, &modifiers),
+        decl(abi::comp::liquid::BUCKET_TEXTURE, "str"),
+        decl(abi::comp::item::BUCKET, ""),
+        decl(abi::comp::BUCKET_LIQUID, "u32").tag(k::STACK),
+        decl(abi::comp::BUCKET_AMOUNT, "u32").tag(k::STACK),
+        decl(abi::comp::BUCKET_TEXTURE, "str")
+            .tag(k::STACK)
+            .tag("component.visual"),
+    ];
     // Variable length (no bytes): attribute modifiers, timers, a block entity's own name (a
     // renamed chest).
     for (name, schema, flags, default) in [
