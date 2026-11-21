@@ -409,7 +409,7 @@ pub mod feature {
 
 /// How a liquid flows and looks from inside (`abi::comp::liquid`).
 pub mod liquid {
-    use crate::Component;
+    use crate::{Component, Text};
     use crate::abi::comp::liquid as l;
     use crate::kind::Liquid;
     pub static DELAY: Component<u32, Liquid> = Component::named(l::DELAY);
@@ -418,6 +418,7 @@ pub mod liquid {
     pub static RENEWABLE: Component<u32, Liquid> = Component::named(l::RENEWABLE);
     pub static DENSITY: Component<i32, Liquid> = Component::named(l::DENSITY);
     pub static HEAT: Component<u32, Liquid> = Component::named(l::HEAT);
+    pub static BUCKET_TEXTURE: Component<Text, Liquid> = Component::named(l::BUCKET_TEXTURE);
 }
 
 /// What a liquid reaction is made of (`abi::comp::reaction`).
