@@ -611,7 +611,7 @@ impl Dim {
             .entities
             .get(player)
             .is_some_and(|e| e.mode.has(crate::tag_bits::game_mode::NO_COSTS));
-        if let Some((l, empty)) = liquid {
+        if let Some((l, empty)) = liquid.filter(|_| sneak) {
             let source = c.liquids[l as usize].first_state;
             // Into what holds liquid, with the same say as placing a block.
             if c.states[hit.state as usize].liquid.is_none()
@@ -653,6 +653,9 @@ impl Dim {
                 self.spread_to(space_id, c, target, source)?;
             }
             return Some(if creative || empty == 0 { held } else { ItemStack::new(empty, 1) });
+        }
+        if sneak {
+            return None;
         }
         let f = decode(c, hit.state).filter(|f| f.source)?;
         let filled = *c.containers.get(&(held.item, f.id))?;
