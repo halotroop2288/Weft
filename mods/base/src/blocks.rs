@@ -389,6 +389,7 @@ pub fn register(r: &mut Registry) {
         .flow_delay(30)
         .drop_off(2)
         .slope_find(2)
+        .density(10000)
         .heat(1300)
         .fog(0x991A00, 0.25, 1.0)
         .no_overlay()
