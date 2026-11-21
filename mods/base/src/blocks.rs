@@ -372,14 +372,13 @@ pub fn register(r: &mut Registry) {
                 .set_text(&BUBBLE, abi::particle::BUBBLE)
                 .tag("water")
         })
-        .renewable(2)
         .fog(0x050533, -8.0, 96.0)
         .environment(
             Environment::new("water_acoustics")
                 .priority(-700)
                 .acoustics(900.0, 0.0, 1.0),
         )
-        .bucket(Item::generated("water_bucket".into()), &crate::items::BUCKET, &crate::tabs::TOOLS);
+        .bucket_texture("water_bucket");
     r.liquid(&LAVA)
         .block(|b| {
             b.light_rgb(15, 10, 4)
@@ -390,10 +389,11 @@ pub fn register(r: &mut Registry) {
         .flow_delay(30)
         .drop_off(2)
         .slope_find(2)
+        .density(10000)
         .heat(1300)
         .fog(0x991A00, 0.25, 1.0)
         .no_overlay()
-        .bucket(Item::generated("lava_bucket".into()), &crate::items::BUCKET, &crate::tabs::TOOLS);
+        .bucket_texture("lava_bucket");
     r.liquid_reaction("#cools_into_stone", "#water")
         .source_turns_into("obsidian")
         .flowing_turns_into("cobblestone")

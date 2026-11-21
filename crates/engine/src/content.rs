@@ -702,10 +702,21 @@ pub struct LiquidDef {
     pub drop_off: u32,
     pub slope_find: u32,
     pub renewable: u32,
+    /// Density from `abi::comp::liquid::DENSITY`; lower values float above higher values.
+    /// Negative values retain the existing convention for liquids that flow upward.
+    pub density: i32,
     /// Lighter than air: flows up.
     pub rises: bool,
     pub temperature: u32,
+    /// Item texture layered onto a bucket while it contains this liquid.
+    pub bucket_texture: String,
     pub environment: Vec<abi::environment::EnvironmentLayer>,
+    /// Reactions which turn a block touched by this falling liquid into a result state.
+    /// Each entry is (matcher for the touched block, result state).
+    pub falls_into: Vec<(u32, u32)>,
+    /// Reactions that turn this liquid into a result when it touches a matching block.
+    /// Each entry is (matcher for the touched block, result state).
+    pub reacts_with: Vec<(u32, u32)>,
 }
 
 impl LiquidDef {
@@ -3963,6 +3974,7 @@ fn freeze_liquids(
             });
             let mut environment = vec![base];
             environment.extend(e.or::<Vec<abi::environment::EnvironmentLayer>>(abi::environment::COMPONENT, Vec::new()));
+            let density = e.or(l::DENSITY, 1000);
             Some(LiquidDef {
                 name: e.name.clone(),
                 first_state: def.first_state,
@@ -3970,14 +3982,18 @@ fn freeze_liquids(
                 drop_off: e.or(l::DROP_OFF, 1u32).clamp(1, 7),
                 slope_find: e.or(l::SLOPE_FIND, 4u32).min(8),
                 renewable: e.or(l::RENEWABLE, u32::MAX),
-                rises: e.or(l::DENSITY, 1000) < 0,
+                density,
+                rises: density < 0,
                 temperature: e.or(l::HEAT, 300),
+                bucket_texture: e.text(l::BUCKET_TEXTURE).unwrap_or_default().to_string(),
                 environment,
+                falls_into: Vec::new(),
+                reacts_with: Vec::new(),
             })
         },
     );
     // Liquids whose block is missing are errors, so ids stay those of the names.
-    let liquids: Vec<LiquidDef> = liquids.into_iter().flatten().collect();
+    let mut liquids: Vec<LiquidDef> = liquids.into_iter().flatten().collect();
     for (id, liquid) in liquids.iter().enumerate() {
         // States 0..8 are levels (0 the source), 8..16 falling: full height.
         for s in 0..16 {
@@ -4023,7 +4039,16 @@ fn freeze_liquids(
     for (liquid, touching, liquid_text, touching_text, source, flowing, falls_into) in reactions.into_iter().flatten() {
         // The side it comes from, against the way it flows.
         let from = |rises: bool| if rises { "down" } else { "up" };
-        let falling = liquids.iter().find(|l| matchers.has(liquid, l.first_state));
+        let falling_id = liquids
+            .iter()
+            .position(|l| matchers.has(liquid, l.first_state));
+        if let (Some(into), Some(id)) = (falls_into, falling_id) {
+            liquids[id].falls_into.push((touching, into));
+        }
+        if let (Some(into), Some(id)) = (flowing, falling_id) {
+            liquids[id].reacts_with.push((touching, into));
+        }
+        let falling = falling_id.map(|id| &liquids[id]);
         for (i, s) in states.iter_mut().enumerate() {
             let Some(l) = s.liquid.map(|l| &liquids[l as usize]) else { continue };
             let made = if i as u32 == l.first_state { source } else { flowing };

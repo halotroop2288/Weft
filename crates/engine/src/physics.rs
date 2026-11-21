@@ -1578,24 +1578,47 @@ pub fn around(c: &Content, block: &impl Cells, pos: DVec3, height: f64, half_wid
 
 /// Which liquid a point is under, its surface considered: water in a block only fills it up to
 /// its level, unless more of the same is on top.
+/// The liquid layers in a cell, ordered from top to bottom. Each entry is
+/// (liquid id, lower face, upper face) in world coordinates.
+fn liquid_layers(c: &Content, block: &impl Cells, at: IVec3) -> Vec<(u16, f64, f64)> {
+    let Some((main, layout)) = block.cell(at) else { return Vec::new() };
+    let fluids: Vec<_> = layout
+        .residents(main)
+        .filter_map(|part| {
+            let id = c.states[part.state as usize].liquid?;
+            let offset = part.state - c.liquids[id as usize].first_state;
+            let amount = if offset == 0 || offset >= 8 { 8 } else { 8 - offset };
+            Some((id, amount))
+        })
+        .collect();
+    let mut layers = Vec::with_capacity(fluids.len());
+    for (i, &(id, amount)) in fluids.iter().enumerate() {
+        let below: u32 = fluids.iter().skip(i + 1).map(|(_, amount)| *amount).sum();
+        let bottom = at.y as f64 + below as f64 / 9.0;
+        let top = at.y as f64 + (below + amount) as f64 / 9.0;
+        layers.push((id, bottom, top));
+    }
+    layers
+}
+
 pub fn liquid_at(c: &Content, block: &impl Cells, p: DVec3) -> Option<u16> {
     let at = p.floor().as_ivec3();
-    let (liquid, surface) = surface_of(c, block, at, block.liquid_block_at(c, p)?)?;
-    (p.y <= surface).then_some(liquid)
+    block.liquid_block_at(c, p)?;
+    liquid_layers(c, block, at)
+        .into_iter()
+        .find(|&(_, bottom, top)| p.y > bottom && p.y <= top)
+        .map(|(id, _, _)| id)
 }
 
 pub fn liquid_surface(c: &Content, block: &impl Cells, at: IVec3) -> Option<(u16, f64)> {
-    surface_of(c, block, at, block.liquid(c, at)?)
-}
-
-fn surface_of(c: &Content, block: &impl Cells, at: IVec3, state: u32) -> Option<(u16, f64)> {
-    let st = &c.states[state as usize];
-    let liquid = st.liquid?;
+    let (liquid, _, mut surface) = *liquid_layers(c, block, at).first()?;
     let covered = block
         .liquid(c, at + IVec3::Y)
-        .is_some_and(|s| c.states[s as usize].liquid == Some(liquid));
-    let surface = if covered { 1.0 } else { (8.0 - st.level as f64) / 9.0 };
-    Some((liquid, at.y as f64 + surface))
+        .is_some_and(|state| c.states[state as usize].liquid == Some(liquid));
+    if covered {
+        surface = at.y as f64 + 1.0;
+    }
+    Some((liquid, surface))
 }
 
 /// How a walker moves itself this tick, in blocks per tick like vanilla.

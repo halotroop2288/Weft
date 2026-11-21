@@ -964,7 +964,12 @@ impl Dim {
                 let main = self.get(space_id, at)?;
                 if *add
                     && self.space(space_id).layout(at).parts(main).any(|other| {
-                        other.owner(at).0 != p && !c.may_share(part.state, other.state) && part.in_cell(cell).overlaps(other, c)
+                        let both_liquids =
+                            c.states[part.state as usize].liquid.is_some() && c.states[other.state as usize].liquid.is_some();
+                        other.owner(at).0 != p
+                            && !both_liquids
+                            && !c.may_share(part.state, other.state)
+                            && part.in_cell(cell).overlaps(other, c)
                     })
                 {
                     return None;
@@ -3346,6 +3351,13 @@ impl Dim {
                 && r.cond
                     .is_none_or(|w| crate::conditions::on_server(self, space_id, c, w, &ask))
             {
+                if let Then::Become(into) = r.then {
+                    match self.consume_falling_reaction(space_id, c, p, part, into) {
+                        Some(true) => return true,
+                        Some(false) => continue,
+                        None => {}
+                    }
+                }
                 self.act(space_id, c, p, part, r.then);
                 return true;
             }

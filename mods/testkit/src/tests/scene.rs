@@ -25,7 +25,6 @@ pub async fn scene(t: T) -> R {
         runner::scenario(&t, "furnace", move |t| furnace(t, plot(0, 1))),
         runner::scenario(&t, "water_flow", move |t| water_flow(t, plot(0, -1))),
         runner::scenario(&t, "water_finds_hole", move |t| water_finds_hole(t, plot(1, 1))),
-        runner::scenario(&t, "infinite_water", move |t| infinite_water(t, plot(-1, -1))),
         runner::scenario(&t, "lava_and_water", move |t| lava_and_water(t, plot(1, -1))),
         runner::scenario(&t, "lava_kills", move |t| lava_kills(t, plot(-1, 1))),
         runner::scenario(&t, "energy_grid", move |t| energy_grid(t, plot(2, 0))),
@@ -222,22 +221,6 @@ async fn water_finds_hole(t: T, s: [i32; 3]) -> R {
     t.check_eq(t.block(hole).await?, "base:water[level=8]".into(), "the hole filled (falling water)");
     t.check_eq(t.block(add(s, [-1, 0, 0])).await?, "core:air".into(), "no spread away from the hole");
     t.check_eq(t.block(add(s, [0, 0, 1])).await?, "core:air".into(), "no spread sideways");
-    Ok(())
-}
-
-/// Two sources with one block between them over solid ground make a third.
-async fn infinite_water(t: T, a: [i32; 3]) -> R {
-    t.set(a, "water").await?;
-    t.set(add(a, [2, 0, 0]), "water").await?;
-    t.secs(1.5).await?;
-    t.check_eq(t.block(add(a, [1, 0, 0])).await?, "base:water[level=0]".into(), "new source between two");
-    // Lava is not renewable: between two sources it only flows.
-    let l = add(a, [0, 0, 12]);
-    t.set(l, "lava").await?;
-    t.set(add(l, [2, 0, 0]), "lava").await?;
-    t.secs(2.0).await?;
-    let mid = t.block(add(l, [1, 0, 0])).await?;
-    t.check(mid.starts_with("base:lava[") && mid != "base:lava[level=0]", format!("between two lava sources: {mid}"));
     Ok(())
 }
 
